@@ -1,0 +1,23 @@
+[project]
+name = "vol-pca"
+version = "0.1.0"
+description = "PCA analysis of SPX implied volatility surfaces"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.11.0",
+    "notebook>=7.5.7",
+    "pandas>=3.0.3",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]        # import the in-tree package without installing
+addopts = "-q"

@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environment (managed by `uv sync`; never commit)
+.venv
+
+# Jupyter checkpoint copies
+.ipynb_checkpoints/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Data — large files kept out of git to avoid history bloat
+*.csv
+*.csv:Zone.Identifier
+/data/
