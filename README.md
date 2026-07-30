@@ -27,6 +27,12 @@ The vol surface data file is deliberately gitignored — never commit it.
 Black-Scholes-input bumps (equity delta/gamma/higher, implied vol, rate,
 dividend, time, vanna); residual daily std is ~0.8% of total P&L std.
 
+`pca_factors.ipynb` illustrates the factor model: factor shape heatmaps and
+tables, cumulative factor history, estimate-vs-full-revaluation quality, and
+an exact reconciliation of the attribution vol component with the PCA vega
+target (vol = surface + roll + slide; roll is anticipatable carry, slide is
+spot-driven).
+
 ## Dev
 
 - `uv sync` — set up the environment

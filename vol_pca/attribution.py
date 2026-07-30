@@ -21,6 +21,15 @@ first two terms x dt (financing the option premium and carrying the delta
 hedge), so `time - time_funding` is the pure gamma theta. A delta-hedged
 book removes `eq_delta` and `time_funding` and keeps everything else.
 
+The vol component is additionally split, exactly (for live legs the three
+parts telescope to `vol`):
+  vol_surface  surface change at the FIXED old (TTM, moneyness) lookup
+               point -- identical to book.py's pl_vega_full, the PCA target
+  vol_roll     term-structure roll to the new TTM, on the new surface;
+               `vol_carry_ex` is the same roll on the OLD surface, i.e. the
+               carry anticipatable at the previous close
+  vol_slide    smile slide to the new moneyness (spot-driven)
+
 residual = actual P&L - sum(components): the remaining cross terms (e.g.
 rate x time, equity x time pin risk on settlement days). It should be small.
 
@@ -85,7 +94,7 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
 
             sig0 = grid_lookup(grid0, ttm0, k / s0 * 100.0)
             r0, q0 = _rq(sd, t - 1, ttm0)
-            v0, delta0, gamma0, _, _ = _bs(s0, k, ttm0, sig0, r0, q0, greeks=True)
+            v0, delta0, gamma0, vega0, _ = _bs(s0, k, ttm0, sig0, r0, q0, greeks=True)
 
             # new values of each input (rate/div at the OLD ttm for independence)
             sig1 = np.where(settled, sig0,
@@ -118,6 +127,25 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
             # funding part of theta (BS PDE), over the leg's actual decay
             time_funding = u * (r0 * v0 - (r0 - q0) * s0 * delta0) * (ttm0 - ttm1)
 
+            # exact split of the vol component: fixed-point surface change
+            # (what the PCA factor model targets), term-structure roll, and
+            # smile slide -- roll and slide on the NEW surface so the three
+            # telescope exactly to the vol component for live legs.
+            # vol_carry_ex is the roll on the OLD surface: computable at the
+            # previous close, i.e. the anticipatable carry.
+            live_m = ~settled
+            mon0 = k / s0 * 100.0
+            sig1_fixed = grid_lookup(grid, ttm0, mon0)
+            sig1_roll = grid_lookup(grid, np.maximum(ttm1, _EPS), mon0)
+            sig0_roll = grid_lookup(grid0, np.maximum(ttm1, _EPS), mon0)
+            v_vf = _bs(s0, k, ttm0, sig1_fixed, r0, q0)
+            v_roll = _bs(s0, k, ttm0, sig1_roll, r0, q0)
+            v_carry = _bs(s0, k, ttm0, sig0_roll, r0, q0)
+            vol_surface = u * (v_vf - v0) * live_m
+            vol_roll = u * (v_roll - v_vf) * live_m
+            vol_slide = u * (v_sig - v_roll) * live_m
+            vol_carry_ex = u * (v_carry - v0) * live_m
+
             row = {
                 "date": d, "spot": s, "gap_days": int((d - d0).astype(int)),
                 "n_spreads": int((~settled).sum()) // 2,
@@ -127,6 +155,8 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
                 "vol": vol.sum(), "rate": rate.sum(), "div": div.sum(),
                 "time": time.sum(), "time_funding": time_funding.sum(),
                 "vanna": vanna.sum(), "resid": resid.sum(),
+                "vol_surface": vol_surface.sum(), "vol_roll": vol_roll.sum(),
+                "vol_slide": vol_slide.sum(), "vol_carry_ex": vol_carry_ex.sum(),
             }
             daily.append(row)
 
@@ -140,6 +170,8 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
                     "eq_gamma": eq_gamma, "eq_higher": eq - eq_delta - eq_gamma,
                     "vol": vol, "rate": rate, "div": div, "time": time,
                     "time_funding": time_funding, "vanna": vanna, "resid": resid,
+                    "vol_surface": vol_surface, "vol_roll": vol_roll,
+                    "vol_slide": vol_slide, "vol_carry_ex": vol_carry_ex,
                 })
 
             val_prev[live] = u * v1

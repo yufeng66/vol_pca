@@ -49,6 +49,11 @@ def test_real_data_matches_book_pl_and_small_residual():
     book, _, _ = simulate_book(small)
     assert np.allclose(res["pl"].to_numpy(), book["pl"].to_numpy(), atol=1e-6)
     assert res["resid"].std() < 0.05 * res["pl"].std()
+    # vol splits telescope exactly; fixed-point piece is book.py's vega target
+    # (tiny tolerance: book.py includes settling legs, the split masks them)
+    split = res[["vol_surface", "vol_roll", "vol_slide"]].sum(axis=1)
+    assert np.allclose(split, res["vol"], atol=1e-8)
+    assert np.allclose(res["vol_surface"], book["pl_vega_full"], atol=100.0)
     det = details[list(details)[0]]
     assert np.allclose(det["pl"], det[["equity", "vol", "rate", "div", "time",
                                        "vanna", "resid"]].sum(axis=1))
