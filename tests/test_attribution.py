@@ -17,6 +17,8 @@ def test_static_world_only_time():
         assert np.allclose(res[c], 0), c
     assert np.allclose(res["pl"], res["time"] + res["resid"])
     assert (res["resid"].abs() < 1e-6 * res["time"].abs().max()).all()
+    # r = q = 0 in the synthetic world -> no funding component of theta
+    assert np.allclose(res["time_funding"], 0)
 
 
 def test_vol_bump_lands_in_vol_component():

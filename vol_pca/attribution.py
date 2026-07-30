@@ -15,6 +15,12 @@ the Black-Scholes arguments:
   time    TTM shrinks, all other inputs held
   vanna   exact spot-vol cross: V(S1,sig1) - V(S1,sig0) - V(S0,sig1) + V0
 
+The time component is additionally split via the BS PDE identity
+theta = rV - (r-q)S delta - 0.5 sigma^2 S^2 gamma: `time_funding` is the
+first two terms x dt (financing the option premium and carrying the delta
+hedge), so `time - time_funding` is the pure gamma theta. A delta-hedged
+book removes `eq_delta` and `time_funding` and keeps everything else.
+
 residual = actual P&L - sum(components): the remaining cross terms (e.g.
 rate x time, equity x time pin risk on settlement days). It should be small.
 
@@ -109,6 +115,8 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
             vanna = u * ((v_ssig - v_s) - (v_sig - v0))
             pl = u * v1 - val_prev[live]
             resid = pl - eq - vol - rate - div - time - vanna
+            # funding part of theta (BS PDE), over the leg's actual decay
+            time_funding = u * (r0 * v0 - (r0 - q0) * s0 * delta0) * (ttm0 - ttm1)
 
             row = {
                 "date": d, "spot": s, "gap_days": int((d - d0).astype(int)),
@@ -117,7 +125,8 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
                 "eq_gamma": eq_gamma.sum(),
                 "eq_higher": (eq - eq_delta - eq_gamma).sum(),
                 "vol": vol.sum(), "rate": rate.sum(), "div": div.sum(),
-                "time": time.sum(), "vanna": vanna.sum(), "resid": resid.sum(),
+                "time": time.sum(), "time_funding": time_funding.sum(),
+                "vanna": vanna.sum(), "resid": resid.sum(),
             }
             daily.append(row)
 
@@ -130,7 +139,7 @@ def independent_attribution(sd, notional=NOTIONAL, detail_dates=()):
                     "pl": pl, "equity": eq, "eq_delta": eq_delta,
                     "eq_gamma": eq_gamma, "eq_higher": eq - eq_delta - eq_gamma,
                     "vol": vol, "rate": rate, "div": div, "time": time,
-                    "vanna": vanna, "resid": resid,
+                    "time_funding": time_funding, "vanna": vanna, "resid": resid,
                 })
 
             val_prev[live] = u * v1
