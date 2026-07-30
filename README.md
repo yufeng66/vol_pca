@@ -23,6 +23,10 @@ Next: historical VaR comparing the PCA-factor approach to full revaluation.
 
 The vol surface data file is deliberately gitignored — never commit it.
 
+`attribution.ipynb` inspects daily P&L attribution with independent
+Black-Scholes-input bumps (equity delta/gamma/higher, implied vol, rate,
+dividend, time, vanna); residual daily std is ~0.8% of total P&L std.
+
 ## Dev
 
 - `uv sync` — set up the environment
