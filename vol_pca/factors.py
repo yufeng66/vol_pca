@@ -1,16 +1,21 @@
 """PCA factor model of vol surface moves and factor-based vega estimates.
 
-Fit: PCA on daily pillar-vol changes, by default on the correlation matrix
-(per-pillar standardized). Standardizing stops the high-variance short-TTM
-pillars from dominating the top factors; empirically it roughly halves the
-low-order truncation error on this book's vega P&L versus covariance PCA.
+Fit: PCA on daily pillar-vol changes X, transformed per pillar by a weight
+vector w: SVD of (X - mu) * w. Supported weightings:
 
-Book exposure to factor k on a given day is the bucketed pillar vega dotted
-with the factor loading mapped back to vol units: E_k = (bucket_vega * scale)
-. L_k. The day's factor movement is the score f_k = L_k . ((dsigma - mu) /
-scale), and the K-factor vega P&L estimate is bucket_vega . mu + sum_{k<=K}
-E_k f_k. With all factors this reproduces bucket_vega . dsigma
-(= pl_vega_lin) exactly.
+  "cov"   w = 1          plain covariance PCA; high-variance short-TTM pillars
+                         dominate the top factors
+  "corr"  w = 1/std      correlation PCA; every pillar matters equally
+  array   custom         e.g. the book's average absolute bucketed vega, so
+                         factor capacity is allocated by dollar P&L impact
+                         instead of raw surface variance (far-OTM short-term
+                         smile noise the book barely prices off gets ignored)
+
+Book exposure to factor k on a given day is E_k = (bucket_vega / w) . L_k,
+the day's factor movement is the score f_k = L_k . ((dsigma - mu) * w), and
+the K-factor vega P&L estimate is bucket_vega . mu + sum_{k<=K} E_k f_k.
+With all factors this reproduces bucket_vega . dsigma (= pl_vega_lin)
+exactly, for any positive weighting.
 """
 
 from dataclasses import dataclass
@@ -22,30 +27,40 @@ import pandas as pd
 @dataclass
 class PCAModel:
     mu: np.ndarray            # (n_pillars,) mean daily change
-    scale: np.ndarray         # (n_pillars,) 1.0s if not standardized
+    weights: np.ndarray       # (n_pillars,) per-pillar transform weights
     components: np.ndarray    # (n_comp, n_pillars) rows orthonormal
-    evr: np.ndarray           # explained variance ratio per component
+    evr: np.ndarray           # explained variance ratio (in weighted space)
 
     @property
     def n_components(self):
         return self.components.shape[0]
 
 
-def fit_pca(dsigma, fit_mask=None, standardize=True):
+def fit_pca(dsigma, fit_mask=None, weights="corr"):
     X = dsigma if fit_mask is None else dsigma[fit_mask]
     mu = X.mean(axis=0)
-    scale = X.std(axis=0) if standardize else np.ones(X.shape[1])
-    _, svals, components = np.linalg.svd((X - mu) / scale, full_matrices=False)
-    return PCAModel(mu=mu, scale=scale, components=components,
+    if isinstance(weights, str):
+        if weights == "cov":
+            w = np.ones(X.shape[1])
+        elif weights == "corr":
+            std = X.std(axis=0)
+            w = 1.0 / np.where(std > 0, std, np.inf)
+        else:
+            raise ValueError(f"unknown weighting {weights!r}")
+    else:
+        w = np.asarray(weights, dtype=float)
+    w = np.maximum(w, 1e-9 * w.max())   # keep the transform invertible
+    _, svals, components = np.linalg.svd((X - mu) * w, full_matrices=False)
+    return PCAModel(mu=mu, weights=w, components=components,
                     evr=svals**2 / (svals**2).sum())
 
 
 def factor_scores(dsigma, model):
-    return ((dsigma - model.mu) / model.scale) @ model.components.T
+    return ((dsigma - model.mu) * model.weights) @ model.components.T
 
 
 def factor_exposures(bucket_vega, model):
-    return (bucket_vega * model.scale) @ model.components.T
+    return (bucket_vega / model.weights) @ model.components.T
 
 
 def factor_vega_estimates(bucket_vega, dsigma, model, ks):

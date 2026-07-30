@@ -10,11 +10,14 @@ Pipeline (`uv run python scripts/run_analysis.py`):
 2. Simulate the book daily; attribute P&L into theta, smile delta, gamma,
    vega (full per-option revaluation), vanna, residual.
 3. Bucket each option's vega onto the pillars (exact, by linear-interpolation
-   weights), fit correlation-PCA on daily surface moves, and estimate vega P&L
-   as factor exposure × daily factor movement.
+   weights), fit vega-weighted PCA on daily surface moves (pillars weighted by
+   the book's average absolute dollar vega), and estimate vega P&L as factor
+   exposure × daily factor movement.
 
-Headline result: 3 PCA factors reproduce the full per-option vega revaluation
-with correlation 0.95 (R² 0.91); the all-factor linear limit is 0.996.
+Headline result: 3 vega-weighted PCA factors reproduce the full per-option
+vega revaluation with correlation 0.98 (R² 0.96); the all-factor linear limit
+is 0.996. Unweighted (correlation) PCA manages only R² 0.91 at k=3 — it spends
+factor capacity on far-wing short-term smile moves the book barely prices off.
 
 Next: historical VaR comparing the PCA-factor approach to full revaluation.
 

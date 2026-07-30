@@ -41,20 +41,24 @@ def main():
     lin_err = np.abs(res["pl_vega_lin"].to_numpy() - (bucket_vega * dsigma).sum(axis=1))
     print(f"\nconsistency: max |pl_vega_lin - bucket_vega . dsigma| = {lin_err.max():.2e} $")
 
-    model = fit_pca(dsigma, fit_mask=normal)                       # correlation PCA
-    model_cov = fit_pca(dsigma, fit_mask=normal, standardize=False)
-    print("\n=== PCA of daily surface moves (correlation, fit on normal days) ===")
-    print("explained variance: " + "  ".join(
+    # headline model: pillars weighted by the book's average absolute vega,
+    # so factors chase dollar-relevant surface movement, not wing noise
+    vega_w = np.abs(bucket_vega[normal]).mean(axis=0)
+    model = fit_pca(dsigma, fit_mask=normal, weights=vega_w)
+    print("\n=== vega-weighted PCA of daily surface moves (fit on normal days) ===")
+    print("explained variance ($-weighted): " + "  ".join(
         f"PC{i+1} {v:.1%}" for i, v in enumerate(model.evr[:6])) +
         f"  | top3 {model.evr[:3].sum():.1%} top5 {model.evr[:5].sum():.1%}")
 
     ks = [1, 2, 3, 5, 10, model.n_components]
     estimates, exposures, scores = factor_vega_estimates(bucket_vega, dsigma, model, ks)
-    est_cov, _, _ = factor_vega_estimates(bucket_vega, dsigma, model_cov, [1, 3])
     target = res["pl_vega_full"].to_numpy()
-    est_named = {f"PCA k={k}" if k < model.n_components else "all factors (=linear)": v
+    est_named = {f"vega-PCA k={k}" if k < model.n_components else "all factors (=linear)": v
                  for k, v in estimates.items()}
-    est_named |= {f"cov-PCA k={k}": v for k, v in est_cov.items()}
+    for name, wt in [("corr", "corr"), ("cov", "cov")]:
+        alt, _, _ = factor_vega_estimates(
+            bucket_vega, dsigma, fit_pca(dsigma, fit_mask=normal, weights=wt), [3])
+        est_named[f"{name}-PCA k=3"] = alt[3]
     print("\n=== factor vega estimate vs full per-option revaluation ===")
     print(estimate_metrics(target, est_named, mask=normal).round(4).to_string())
 
@@ -63,7 +67,7 @@ def main():
     res.to_csv(out / "daily_results.csv")
     np.savez_compressed(out / "factor_model.npz",
                         dates=res.index.to_numpy(), bucket_vega=bucket_vega,
-                        dsigma=dsigma, mu=model.mu, scale=model.scale,
+                        dsigma=dsigma, mu=model.mu, weights=model.weights,
                         components=model.components, evr=model.evr,
                         exposures=exposures, scores=scores, normal=normal)
     print(f"\nsaved {out/'daily_results.csv'} and {out/'factor_model.npz'}")

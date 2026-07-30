@@ -48,8 +48,9 @@ def test_vol_bump_captured_by_vega():
 
 def test_all_factor_estimate_reproduces_linear_vega():
     res, bucket_vega, dsigma = simulate_book(_flat_sd(n_days=6, bump_day=3, bump=0.005))
-    for standardize in (False, True):
-        model = fit_pca(dsigma, standardize=standardize)
+    vega_w = np.abs(bucket_vega).mean(axis=0)
+    for weights in ("cov", "corr", vega_w):
+        model = fit_pca(dsigma, weights=weights)
         est, _, _ = factor_vega_estimates(bucket_vega, dsigma, model, [model.n_components])
         assert np.allclose(est[model.n_components], res["pl_vega_lin"].to_numpy(), atol=1e-8)
 
