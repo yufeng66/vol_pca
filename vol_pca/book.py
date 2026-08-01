@@ -21,7 +21,8 @@ state (sticky-TTM conventions):
   residual   everything else (higher-order terms, curve moves, wing clamps)
 
 vega_lin (old vega x vol change at the same lookup point) equals
-bucket_vega . dsigma exactly because the grid lookup is linear in pillar vols.
+bucket_vega . dsigma exactly because the grid lookup — bicubic spline with
+fixed knots — is linear in the pillar vols.
 """
 
 import numpy as np

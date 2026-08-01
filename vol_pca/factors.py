@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import PchipInterpolator
 
 from vol_pca.surface import MONEYNESS, TTM_PILLARS, grid_lookup
 
@@ -57,7 +58,7 @@ def fit_pca(dsigma, fit_mask=None, weights="corr"):
                     evr=svals**2 / (svals**2).sum())
 
 
-def sticky_strike_dsigma(sd):
+def sticky_strike_dsigma(sd, interp="cubic", include_roll=False):
     """Daily pillar vol changes in sticky-STRIKE coordinates.
 
     The default `dsigma` from simulate_book is sticky-moneyness: the change
@@ -73,13 +74,46 @@ def sticky_strike_dsigma(sd):
     interpolation brackets, so the exact bucketed-vega identity is lost
     (second-order error), and the outermost columns clamp against the 50/150
     moneyness edge of the quoted grid.
+
+    include_roll=True folds the term-structure roll in as well: the pillar
+    then tracks a fixed OPTION (fixed strike AND fixed expiry), so day t
+    samples at the decayed TTM too:
+
+        dsigma[t, (i,j)] = sigma_t(tau_i - dt_t, m_j S_{t-1}/S_t) - sigma_{t-1}[i, j]
+
+    with dt_t the calendar-day gap / 365 — surface move + smile slide + term
+    roll, i.e. the option's own implied-vol change, so bucket_vega . dsigma
+    estimates the attribution's full `vol` component and the roll drift moves
+    into the factor mean. The shortest TTM pillar clamps at the 0.08 grid
+    edge, losing a sliver of roll there.
+
+    interp selects how day t's surface is sampled at the rescaled point:
+    "cubic" (the grid_lookup interpolant pricing itself uses), "linear"
+    (bilinear), or "pchip" (shape-preserving cubic along the moneyness axis:
+    C1-smooth but monotone between quotes, so it cannot overshoot in the
+    steep put wing the way an unconstrained spline can; moneyness-only, so
+    not available with include_roll).
     """
+    if include_roll and interp == "pchip":
+        raise ValueError("include_roll needs 2-D interpolation (linear/cubic)")
     nt, nm = len(TTM_PILLARS), len(MONEYNESS)
-    ttm_q = np.repeat(TTM_PILLARS, nm)
     out = np.empty((len(sd) - 1, nt * nm))
     for t in range(1, len(sd)):
-        mon_q = np.tile(MONEYNESS * (sd.spot[t - 1] / sd.spot[t]), nt)
-        out[t - 1] = grid_lookup(sd.grids[t], ttm_q, mon_q) - sd.grids[t - 1].ravel()
+        mon_q = np.clip(MONEYNESS * (sd.spot[t - 1] / sd.spot[t]),
+                        MONEYNESS[0], MONEYNESS[-1])
+        ttm = TTM_PILLARS
+        if include_roll:
+            dt = (sd.dates[t] - sd.dates[t - 1]).astype(float) / 365.0
+            ttm = TTM_PILLARS - dt          # grid_lookup clamps at the edge
+        if interp in ("linear", "cubic"):
+            new = grid_lookup(sd.grids[t], np.repeat(ttm, nm),
+                              np.tile(mon_q, nt), interp=interp)
+        elif interp == "pchip":
+            new = np.stack([PchipInterpolator(MONEYNESS, row)(mon_q)
+                            for row in sd.grids[t]]).ravel()
+        else:
+            raise ValueError(f"unknown interp {interp!r}")
+        out[t - 1] = new - sd.grids[t - 1].ravel()
     return out
 
 
