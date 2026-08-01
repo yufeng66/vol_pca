@@ -23,6 +23,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from vol_pca.surface import MONEYNESS, TTM_PILLARS, grid_lookup
+
 
 @dataclass
 class PCAModel:
@@ -53,6 +55,32 @@ def fit_pca(dsigma, fit_mask=None, weights="corr"):
     _, svals, components = np.linalg.svd((X - mu) * w, full_matrices=False)
     return PCAModel(mu=mu, weights=w, components=components,
                     evr=svals**2 / (svals**2).sum())
+
+
+def sticky_strike_dsigma(sd):
+    """Daily pillar vol changes in sticky-STRIKE coordinates.
+
+    The default `dsigma` from simulate_book is sticky-moneyness: the change
+    of the surface at a fixed (TTM, % of spot) point. Here each pillar
+    instead tracks a fixed STRIKE, re-anchored to the previous close every
+    day: pillar (tau_i, m_j) on day t-1 is the strike K = m_j% x S_{t-1},
+    whose moneyness on day t is m_j x S_{t-1}/S_t. So
+
+        dsigma_ss[t, (i,j)] = sigma_t(tau_i, m_j S_{t-1}/S_t) - sigma_{t-1}[i, j]
+
+    i.e. surface change plus smile slide, at fixed TTM (term roll excluded).
+    Two caveats vs the fixed-moneyness version: the rescaled query can cross
+    interpolation brackets, so the exact bucketed-vega identity is lost
+    (second-order error), and the outermost columns clamp against the 50/150
+    moneyness edge of the quoted grid.
+    """
+    nt, nm = len(TTM_PILLARS), len(MONEYNESS)
+    ttm_q = np.repeat(TTM_PILLARS, nm)
+    out = np.empty((len(sd) - 1, nt * nm))
+    for t in range(1, len(sd)):
+        mon_q = np.tile(MONEYNESS * (sd.spot[t - 1] / sd.spot[t]), nt)
+        out[t - 1] = grid_lookup(sd.grids[t], ttm_q, mon_q) - sd.grids[t - 1].ravel()
+    return out
 
 
 def factor_scores(dsigma, model):

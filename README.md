@@ -33,6 +33,13 @@ an exact reconciliation of the attribution vol component with the PCA vega
 target (vol = surface + roll + slide; roll is anticipatable carry, slide is
 spot-driven).
 
+`sticky_strike.ipynb` refits the same vega-weighted PCA in sticky-strike
+coordinates (surface sampled at the fixed strike, so slide is inside the
+factors) and compares: near-ATM daily moves halve, PC1 is far less
+spot-entangled, but the estimate of the fixed-strike vol P&L trails
+moneyness-PCA + slide at every factor count and its linear ceiling is lower,
+so the headline model stays sticky-moneyness paired with the smile delta.
+
 ## Dev
 
 - `uv sync` — set up the environment
