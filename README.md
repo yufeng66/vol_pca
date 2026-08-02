@@ -59,7 +59,16 @@ by 10%, and the all-factor projection matches to 0.1%. A rolling backtest
 (`scripts/run_var_rolling.py`, every as-of date 2015–2026) puts typical
 accuracy at a median 3% hedged gap for k=10 and shows the third-order equity
 term is worth its two extra spot bumps at small k (~0.5pp mean improvement) —
-while crisis-peak as-of dates understate by ~60% at any k (vega convexity).
+while crisis-peak as-of dates understate by ~60% — factor truncation from
+frozen average-book weights, which a statics-only adaptive weighting
+(strike-histogram, no greeks) caps at −22% at the cost of bulk accuracy: a
+parallel drift alarm rather than a replacement. The projection also runs
+fully formula-free (`bump_greeks`/`bump_pnl`: 32 revaluations per book —
+spot stencil, 1σ factor-shape pairs with free curvatures, PC1–3
+spot×factor crosses, tenor-weighted rate/div), built for the real-book
+assumption that greeks exist only via bumped revaluations of a simulation
+pricer; it matches the analytic-greeks projection to 0.7pp at k=5, and
+closed-form greeks remain only as test oracles.
 
 `sticky_strike.ipynb` is the comparison that motivated the framework choice:
 sticky-strike vs sticky-moneyness coordinates, same vega-weighted fit.

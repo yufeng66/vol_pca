@@ -33,6 +33,8 @@ class PCAModel:
     weights: np.ndarray       # (n_pillars,) per-pillar transform weights
     components: np.ndarray    # (n_comp, n_pillars) rows orthonormal
     evr: np.ndarray           # explained variance ratio (in weighted space)
+    score_std: np.ndarray = None   # (n_comp,) fit-sample std of each score —
+                                   # the natural "1 sigma" bump size per factor
 
     @property
     def n_components(self):
@@ -55,7 +57,8 @@ def fit_pca(dsigma, fit_mask=None, weights="corr"):
     w = np.maximum(w, 1e-9 * w.max())   # keep the transform invertible
     _, svals, components = np.linalg.svd((X - mu) * w, full_matrices=False)
     return PCAModel(mu=mu, weights=w, components=components,
-                    evr=svals**2 / (svals**2).sum())
+                    evr=svals**2 / (svals**2).sum(),
+                    score_std=svals / np.sqrt(X.shape[0]))
 
 
 def sticky_strike_dsigma(sd, interp="cubic", include_roll=False):
@@ -123,6 +126,40 @@ def factor_scores(dsigma, model):
 
 def factor_exposures(bucket_vega, model):
     return (bucket_vega / model.weights) @ model.components.T
+
+
+def bumped_factor_exposures(price_fn, model, k, eps, curvature=True):
+    """Factor exposures by bump-and-revalue, for books whose pricing model
+    has no cheap per-pillar vega (simulation-priced payoffs): the central
+    difference of the book value along each factor's unit-score surface
+    move L_j / w — the raw-vol pillar shift that scores as f_j = 1 and
+    f_other = 0 — so in the small-eps limit E_j matches
+    factor_exposures(bucket_vega) exactly for any pricer that is smooth in
+    the pillar vols.
+
+    price_fn(dsigma) -> book value under the (n_pillars,) pillar vol shift;
+    it is the only thing that touches the pricing model, so a simulated
+    book plugs in unchanged (2k valuations plus one shared base call).
+    eps sizes the bumps in score units (scalar or per-factor): a finite eps
+    makes E_j a secant slope over +/-eps, so size it to the moves you care
+    about (the fit-sample score std, or a tail quantile for VaR use).
+
+    curvature=True also returns d2V/df1^2 from the PC1 pair at no extra
+    valuations — the second-order exposure for a 0.5 * curv * f1^2 term
+    (PC1 carries most of the variance, so its square is the first Hessian
+    term worth having).
+    """
+    eps = np.broadcast_to(np.asarray(eps, dtype=float), (k,))
+    base = price_fn(np.zeros(model.components.shape[1]))
+    expos = np.empty(k)
+    curv = None
+    for j in range(k):
+        d = eps[j] * model.components[j] / model.weights
+        up, dn = price_fn(d), price_fn(-d)
+        expos[j] = (up - dn) / (2.0 * eps[j])
+        if j == 0 and curvature:
+            curv = (up - 2.0 * base + dn) / eps[j] ** 2
+    return expos, curv
 
 
 def factor_vega_estimates(bucket_vega, dsigma, model, ks):

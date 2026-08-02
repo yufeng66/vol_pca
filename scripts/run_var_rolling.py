@@ -14,7 +14,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from vol_pca import load_surfaces, simulate_book, fit_pca
 from vol_pca.factors import sticky_strike_dsigma
-from vol_pca.var import rolling_var_backtest
+from vol_pca.var import (rolling_var_adaptive, rolling_var_backtest,
+                         rolling_var_bump, strike_histogram_weights)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -23,13 +24,37 @@ sd = load_surfaces(ROOT / "SPX_volSurface 2.csv")
 _, bucket_vega_hist, _ = simulate_book(sd)
 normal = np.diff(sd.dates).astype(int) <= 7
 vega_w = np.abs(bucket_vega_hist[normal]).mean(axis=0)
-model = fit_pca(sticky_strike_dsigma(sd, include_roll=True),
-                fit_mask=normal, weights=vega_w)
+ds_roll = sticky_strike_dsigma(sd, include_roll=True)
+model = fit_pca(ds_roll, fit_mask=normal, weights=vega_w)
+(ROOT / "data").mkdir(exist_ok=True)
 
-roll = rolling_var_backtest(sd, model, ks=(3, 4, 5, 10), start=252,
-                            mask=normal)
 out = ROOT / "data" / "var_rolling.csv"
-out.parent.mkdir(exist_ok=True)
-roll.to_csv(out)
-print(f"{len(roll)} as-of dates -> {out}  ({time.time() - t0:,.0f}s)")
-print(roll[["full_h", "g3_h", "g3c_h", "g10_h", "g10c_h"]].describe().round(0).to_string())
+if not out.exists():
+    roll = rolling_var_backtest(sd, model, ks=(3, 4, 5, 10), start=252,
+                                mask=normal)
+    roll.to_csv(out)
+    print(f"{len(roll)} as-of dates -> {out}  ({time.time() - t0:,.0f}s)")
+    print(roll[["full_h", "g3_h", "g3c_h", "g10_h", "g10c_h"]]
+          .describe().round(0).to_string())
+else:
+    print(f"{out} exists, skipping the full-reval pass")
+
+out_s = ROOT / "data" / "var_rolling_strike.csv"
+if not out_s.exists():
+    t0 = time.time()
+    adapt = rolling_var_adaptive(sd, strike_histogram_weights, ds_roll,
+                                 fit_mask=normal, ks=(4, 10), start=252,
+                                 mask=normal)
+    adapt.to_csv(out_s)
+    print(f"{len(adapt)} as-of dates -> {out_s}  ({time.time() - t0:,.0f}s)")
+else:
+    print(f"{out_s} exists, skipping the adaptive pass")
+
+out_b = ROOT / "data" / "var_rolling_bump.csv"
+if not out_b.exists():
+    t0 = time.time()
+    bump = rolling_var_bump(sd, model, start=252, mask=normal)
+    bump.to_csv(out_b)
+    print(f"{len(bump)} as-of dates -> {out_b}  ({time.time() - t0:,.0f}s)")
+else:
+    print(f"{out_b} exists, skipping the bump-path pass")

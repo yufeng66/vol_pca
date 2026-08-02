@@ -5,10 +5,15 @@ import pytest
 
 from tests.test_book import _flat_sd
 from vol_pca.data import SurfaceData, load_surfaces
-from vol_pca.factors import fit_pca
-from vol_pca.var import (book_speed, build_book, build_scenarios,
+from vol_pca.factors import (bumped_factor_exposures, factor_exposures,
+                             factor_scores, fit_pca)
+from vol_pca.surface import MONEYNESS, N_PILLARS, TTM_PILLARS
+from vol_pca.var import (book_price_fn, book_speed, build_book,
+                         build_scenarios, bump_greeks, bump_pnl,
                          full_reval_pnl, greeks_pnl, hist_var,
-                         rolling_var_backtest, scenario_dsigma)
+                         rolling_var_adaptive, rolling_var_backtest,
+                         rolling_var_bump, scenario_dsigma,
+                         strike_histogram_weights)
 
 CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface 2.csv"
 
@@ -98,6 +103,140 @@ def test_book_speed_matches_stencil_delta_gamma_scale():
     assert np.isclose((v[1] - 2 * v[0] + v[-1]) / h**2,
                       (book.units * book.gamma0).sum(), rtol=1e-2)
     assert np.isfinite(book_speed(book))
+
+
+def test_strike_histogram_weights():
+    # flat book: 6 daily spreads at 100/110% of a constant spot, all ~1Y TTM
+    sd = _flat_sd(n_days=6)
+    book = build_book(sd)
+    w = strike_histogram_weights(book, floor_frac=0.05)
+    assert w.shape == (N_PILLARS,)
+    assert np.isclose(w.max(), 1.0) and w.min() >= 0.05
+    g = w.reshape(len(TTM_PILLARS), len(MONEYNESS))
+    # mass sits on the 12M row at the 100/110 strike columns...
+    i100, i110 = list(MONEYNESS).index(100), list(MONEYNESS).index(110)
+    assert g[-1, i100] > 0.5 and g[-1, i110] > 0.5
+    # ...and the short-TTM rows and far wings are pure floor
+    assert np.allclose(g[:5], 0.05)
+    assert np.allclose(g[-1, [0, -1]], 0.05)
+
+
+def _noisy_model_and_book(spot_moves=False):
+    sd = _flat_sd(n_days=6, bump_day=3, bump=0.005)
+    if spot_moves:
+        sd.spot[:] = [100.0, 101.0, 99.9, 100.4, 100.9, 100.0]
+    book = build_book(sd)
+    ds = scenario_dsigma(book, build_scenarios(sd, book))
+    rng = np.random.default_rng(1)
+    ds = ds + 1e-3 * rng.standard_normal(ds.shape)   # non-degenerate fit
+    model = fit_pca(ds, weights=rng.uniform(0.5, 2.0, ds.shape[1]))
+    return sd, book, model, ds
+
+
+def test_bumped_exposures_match_analytic():
+    # small-eps central differences along L_j/w reproduce the analytic
+    # (bucket_vega / w) . L_j exposures — the bump route generalizes the
+    # vega-scatter route, it does not change it
+    _, book, model, ds = _noisy_model_and_book()
+    pf = book_price_fn(book)
+    assert np.isclose(pf(np.zeros(ds.shape[1])),
+                      float((book.units * book.v0).sum()))
+    s1 = factor_scores(ds, model)[:, 0].std()
+    expos, curv = bumped_factor_exposures(pf, model, k=4, eps=0.01 * s1)
+    analytic = factor_exposures(book.bucket_vega, model)[:4]
+    assert np.allclose(expos, analytic, rtol=1e-3,
+                       atol=1e-4 * np.abs(analytic).max())
+    assert curv is not None and np.isfinite(curv)
+
+
+def test_pc1_squared_improves_large_move_estimate():
+    # calibrate slope + curvature from the +/-eps pair, then predict the book
+    # value at 1.5 eps along PC1 (outside the calibration points): the
+    # 0.5 * curv * f^2 term must move the estimate toward the truth
+    _, book, model, ds = _noisy_model_and_book()
+    pf = book_price_fn(book)
+    eps = 2.0 * factor_scores(ds, model)[:, 0].std()
+    expos, curv = bumped_factor_exposures(pf, model, k=1, eps=eps)
+    x = 1.5 * eps
+    truth = pf(x * model.components[0] / model.weights) - pf(
+        np.zeros(model.components.shape[1]))
+    lin = expos[0] * x
+    quad = lin + 0.5 * curv * x**2
+    assert abs(quad - truth) < abs(lin - truth)
+
+
+def test_bump_greeks_match_analytic():
+    # every sensitivity in the formula-free pass reproduces its closed-form
+    # counterpart (the formulas' only remaining job: validating the bumps)
+    _, book, model, ds = _noisy_model_and_book()
+    bg = bump_greeks(book, model, k=3, k_cross=3,
+                     eps=1e-3 * model.score_std[:3])
+    assert bg.n_revals == 10 + 6 + 12
+    assert np.isclose(bg.v0, float((book.units * book.v0).sum()))
+    assert np.isclose(bg.delta, book.net_delta, rtol=1e-3)
+    assert np.isclose(bg.gamma, float((book.units * book.gamma0).sum()),
+                      rtol=1e-2)
+    assert np.isclose(bg.speed, book_speed(book), rtol=1e-6)
+    assert np.isclose(bg.rho, float(book.rho0.sum()), rtol=1e-2)
+    assert np.isclose(bg.dvq, float(book.dvq0.sum()), rtol=1e-2)
+    ana_e = factor_exposures(book.bucket_vega, model)[:3]
+    assert np.allclose(bg.expos, ana_e, rtol=1e-3,
+                       atol=1e-4 * np.abs(ana_e).max())
+    ana_x = (model.components[:3] / model.weights) @ book.bucket_vanna
+    assert np.allclose(bg.cross, ana_x, rtol=2e-2,
+                       atol=1e-3 * np.abs(ana_x).max())
+
+
+def test_bump_pnl_matches_formula_projection():
+    # with tiny bumps, no quad term and crosses for every factor, the bump
+    # projection agrees with the analytic greeks_pnl estimate (mu zeroed so
+    # both vanna conventions coincide; rate/div are zero in the flat world)
+    sd, book, model, ds = _noisy_model_and_book(spot_moves=True)
+    model.mu[:] = 0.0
+    scen = build_scenarios(sd, book)
+    est_a = greeks_pnl(book, scen, model, ks=[3], dsigma_scen=ds)[0][3]
+    bg = bump_greeks(book, model, k=3, k_cross=3,
+                     eps=1e-3 * model.score_std[:3])
+    est_b = bump_pnl(book, bg, scen, model, dsigma_scen=ds,
+                     quad=None, cube=False)
+    assert np.allclose(est_b, est_a,
+                       atol=max(1e-6, 5e-3 * np.abs(est_a).max()))
+    with_cube = bump_pnl(book, bg, scen, model, dsigma_scen=ds, quad=None)
+    dS = book.spot * (scen.ratio - 1.0)
+    assert np.allclose(with_cube - est_b, bg.speed / 6.0 * dS**3)
+
+
+@pytest.mark.skipif(not CSV.exists(), reason="vol surface data not present")
+def test_rolling_adaptive_smoke():
+    sd = load_surfaces(CSV)
+    m = 90
+    small = SurfaceData(dates=sd.dates[:m], spot=sd.spot[:m], grids=sd.grids[:m],
+                        curve_ttms=sd.curve_ttms[:m], curve_lndf=sd.curve_lndf[:m],
+                        curve_lnfr=sd.curve_lnfr[:m])
+    book = build_book(small)
+    ds = scenario_dsigma(book, build_scenarios(small, book))
+    adapt = rolling_var_adaptive(small, strike_histogram_weights, ds,
+                                 ks=(3,), start=85, n_jobs=2)
+    assert len(adapt) == 5
+    for col in ("s3_h", "s3c_h", "s3_raw", "s3c_raw"):
+        assert (adapt[col] > 0).all()
+
+
+@pytest.mark.skipif(not CSV.exists(), reason="vol surface data not present")
+def test_rolling_bump_smoke():
+    sd = load_surfaces(CSV)
+    m = 90
+    small = SurfaceData(dates=sd.dates[:m], spot=sd.spot[:m], grids=sd.grids[:m],
+                        curve_ttms=sd.curve_ttms[:m], curve_lndf=sd.curve_lndf[:m],
+                        curve_lnfr=sd.curve_lnfr[:m])
+    book = build_book(small)
+    ds = scenario_dsigma(book, build_scenarios(small, book))
+    model = fit_pca(ds, weights=np.abs(book.bucket_vega))
+    roll = rolling_var_bump(small, model, start=85, n_jobs=2, k=3, k_cross=1)
+    assert len(roll) == 5
+    assert (roll.n_revals == 10 + 6 + 4).all()
+    for col in ("b3c_h", "b3_h", "b3c_raw", "b3_raw"):
+        assert (roll[col] > 0).all()
 
 
 @pytest.mark.skipif(not CSV.exists(), reason="vol surface data not present")
