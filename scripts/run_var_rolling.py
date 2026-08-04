@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from vol_pca import load_surfaces, simulate_book, fit_pca
 from vol_pca.factors import sticky_strike_dsigma
+from vol_pca.key_rate import rolling_var_keyrate
 from vol_pca.var import (rolling_var_adaptive, rolling_var_backtest,
                          rolling_var_bump, strike_histogram_weights)
 
@@ -58,3 +59,12 @@ if not out_b.exists():
     print(f"{len(bump)} as-of dates -> {out_b}  ({time.time() - t0:,.0f}s)")
 else:
     print(f"{out_b} exists, skipping the bump-path pass")
+
+out_k = ROOT / "data" / "var_rolling_keyrate.csv"
+if not out_k.exists():
+    t0 = time.time()
+    kr = rolling_var_keyrate(sd, start=252, mask=normal)
+    kr.to_csv(out_k)
+    print(f"{len(kr)} as-of dates -> {out_k}  ({time.time() - t0:,.0f}s)")
+else:
+    print(f"{out_k} exists, skipping the key-rate pass")
