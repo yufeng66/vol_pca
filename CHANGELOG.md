@@ -61,6 +61,16 @@ and git history.
   views); the original SM study was renamed
   `rainbow_attribution_sm.ipynb` with a historical-reference banner
   (unmaintained; its eq_delta is the smile-delta reporting split).
+- Record (desk-view headline, user, 2026-08-06): the canonical notebook's
+  hedged headline is the **desk view** `pl − eq_delta − theta_value −
+  theta_delta` = **−$11.51M** (std $94.1k — the carry is smooth, so the risk
+  numbers don't move): delta P&L is hedged away, theta_value (−$3.52M) is
+  treasury's interest on the option market value, theta_delta (+$1.44M) is
+  the forward-roll gain that pays the delta-one desk's funding on the hedge;
+  the desk keeps only theta_gamma (+$0.48M). Same convention as the vanilla
+  thread's `hedged = pl − eq_delta − time_funding`. The SS-vs-SM 43% verdict
+  (greeks nb §6) is carry-insensitive — both series there are
+  carry-inclusive by identical construction.
 
 ## 2026-08-06 — Sticky-strike bump greeks: the cross-gamma matrix is the book's main convexity
 
