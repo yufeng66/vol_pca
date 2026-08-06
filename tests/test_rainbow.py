@@ -7,11 +7,11 @@ from scipy.stats import norm
 from tests.test_book import _flat_sd
 from vol_pca.data import load_surfaces
 from vol_pca.pricing import black76
-from vol_pca.rainbow import (bs_implied_vol, call_spread_payoff, date_index,
-                             historical_corr, implied_marginal,
-                             marginal_call_spread, price_rainbow,
-                             price_rainbow_quad, rainbow_basket,
-                             sample_performances, spot_panel)
+from vol_pca.rainbow import (GEO_WEIGHTS, bs_implied_vol, call_spread_payoff,
+                             date_index, geo_basket, historical_corr,
+                             implied_marginal, marginal_call_spread,
+                             price_geo_quad, price_rainbow, price_rainbow_quad,
+                             rainbow_basket, sample_performances, spot_panel)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV = ROOT / "SPX_volSurface.csv"
@@ -115,6 +115,54 @@ def test_seasoned_quad_matches_mc():
     neutral = price_rainbow_quad([marg] * 3, corr, df=0.99,
                                  perf_to_date=(1.0, 1.0, 1.0))
     assert neutral["pv"] == fresh["pv"]
+
+
+def test_geo_quad_matches_black_flat():
+    # flat surfaces make every marginal lognormal, and a Gaussian copula
+    # over lognormals is a joint lognormal — so the fixed-weight geometric
+    # basket is itself lognormal and its call spread has an exact Black
+    # price. This pins the whole conditional-survival construction of
+    # price_geo_quad end to end (grid floor ~2bp of price).
+    vols = (0.20, 0.25, 0.30)
+    corr = np.array([[1.0, 0.6, 0.4], [0.6, 1.0, 0.5], [0.4, 0.5, 1.0]])
+    marg = [implied_marginal(_flat_sd(vol=v), 0, 1.0) for v in vols]
+    w = np.asarray(GEO_WEIGHTS)
+    s = np.asarray(vols)
+    for g in [(1.0, 1.0, 1.0), (1.1, 0.95, 1.05)]:
+        m = float(np.sum(w * (np.log(g) - 0.5 * s**2)))
+        v = float(w @ (corr * np.outer(s, s)) @ w)
+        fg = np.exp(m + 0.5 * v)
+        bs = lambda k: float(np.atleast_1d(
+            black76(fg, k, 1.0, np.sqrt(v), 1.0))[0])
+        ref = (bs(1.00) - bs(1.12)) * 1e6
+        got = price_geo_quad(marg, corr, 1.0, perf_to_date=g)["pv"]
+        assert abs(got - ref) < 5e-5 * ref
+
+
+def test_geo_cv_mechanics():
+    # the estimator identity, and the textbook variance reduction under
+    # pseudo-random MC (the regime where a control variate is supposed to
+    # work; under Sobol it is a measured negative — see price_rainbow).
+    sd = _flat_sd()
+    marg = [implied_marginal(sd, 0, 1.0)] * 3
+    corr = np.array([[1.0, 0.6, 0.3], [0.6, 1.0, 0.4], [0.3, 0.4, 1.0]])
+    plain, cv = [], []
+    for seed in range(8):
+        r = price_rainbow(marg, corr, 1.0, 2048, seed=seed, method="pseudo",
+                          cv="geo", cv_beta=1.0)
+        assert r["cv_corr"] > 0.95
+        assert np.isclose(r["pv"], r["pv_plain"]
+                          - r["cv_beta"] * (r["cv_mc"] - r["cv_ec"]))
+        plain.append(r["pv_plain"])
+        cv.append(r["pv"])
+    assert np.std(cv) < 0.4 * np.std(plain)
+    # beta="fit" stays near 1 for this near-collinear pair
+    r = price_rainbow(marg, corr, 1.0, 2048, seed=0, method="pseudo",
+                      cv="geo", cv_beta="fit")
+    assert 0.8 < r["cv_beta"] < 1.2
+    # geo_basket is the plain product for equal columns
+    perf = np.full((5, 3), 1.3)
+    assert np.allclose(geo_basket(perf), 1.3)
 
 
 def test_quad_analytic_anchors():
