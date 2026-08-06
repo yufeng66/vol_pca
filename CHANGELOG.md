@@ -10,6 +10,82 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-06 — Rainbow cheap-VaR benchmark across five gamma regimes: the projection owns the bulk, a ~10% dual-screened partial reval makes VaR99 exact
+
+- The rainbow thread's first VaR study (user: "pick one day with negative
+  gamma — hedged vs unhedged, full bump vs greek based", then "pick several
+  more days"). Phase 1, as-of **2022-03-16** (the short-gamma book: all
+  nine 1%-bump gamma-matrix entries negative, 1'Γ1 −$640M; SS deltas
+  −$27.3/−$19.9/−$10.9M per 100%): nested full reval of all 1,968
+  joint-date scenarios (≈512k revaluations, **57 s** CRN Sobol 512 —
+  beating the ~3 min planning figure) vs the formula-free bump projection
+  (**102 CRN pricings, 1.9 s**); SS-delta hedge cuts full VaR99 $1.69M →
+  $636k; projection gaps: unhedged −0.1%, hedged −2.8% (per-index k=4×3) /
+  −4.2% (joint 3-surface fit, 4 factors). Phase 2 — the **five-date regime
+  panel** (~1 GPU min/date makes hand-picked days the right scale; the
+  ~33 h rolling history explicitly skipped): + 2020-03-16 (COVID peak — the
+  displaced far-OTM book is LONG SPX gamma +$98M with tiny deltas),
+  2021-09-20 (mixed signs), 2024-10-08 (rally book, long gamma),
+  2026-07-31 (current book, deep ITM, 1'Γ1 +$691M). **The single-date
+  hedged answer did not survive the panel**: the same k=4 projection that
+  sits −2.8% on the bear book understates hedged VaR99 by −18…−49% on the
+  other four regimes (hedged corr 0.32 on the COVID as-of, 0.92–0.99
+  elsewhere); unhedged stays easy (within ~3% everywhere except the COVID
+  as-of's −10%). Diagnosis: the hedged tail on every as-of is the same few
+  historical shocks (March-2020, 2025-04), where (a) the spot Taylor is
+  beyond its radius on |dS|≳5% — the COVID book's local long-gamma
+  quadratic predicts +$2.3M on the −9.5% 2020-03-12 scenario where full
+  reval says −$0.4M — and (b) linear vega understates short-vega losses
+  ~20–40% under ±10–20-vol-pt shocks; factor truncation is NOT the driver
+  (k=18 ≈ k=12; joint-4 tracks per-index-12 within a few points on every
+  book, so 4 joint factors stay the projection's budget config). The fix is
+  the vanilla crisis-tail owner, transferred: **dual-screened partial
+  reval** — fully revalue worst-100 by unhedged ∪ worst-100 by hedged
+  projection ∪ every any-index |dS|>4% scenario (~175–220 ≈ 10% of the
+  sweep, greeks-side info only) — **hedged AND unhedged VaR99 land at 0.0%
+  on all five books**; VaR95 within 0–27% at m=100, within ~1% at m=250
+  (~20–25%). Budget ladder per as-of: 2 s projection → 8 s hybrid (VaR99
+  exact) → 15 s wide hybrid (VaR95 too) → 57 s full benchmark.
+- Record: VaR section at the end of `rainbow_torch.py`. `rainbow_scenarios`
+  → RainbowScenarios (per-index spot ratios, fixed-moneyness Δgrids, dt
+  over joint pairs); `rainbow_var_full` = the chunked nested sweep (chunk=8
+  scenarios × book stacked per `tables()` call via (B,8,13) dgrids;
+  scenario state = `tables(dgrid=Δ, tau=τ−dt, tau_price=τ)` at g0·u — the
+  scenario dgrid is the RAW fixed-moneyness change, NO strike shift (the
+  attribution's eq+vol composition identity is the proof; adding one
+  double-counts the slide); curves frozen in both engines (fwd ~4% of
+  daily P&L std, rate ~0.4%)); `rainbow_fit_dsigma`/`rainbow_scenario_dsigma`
+  = roll-in sticky-strike pillar moves over joint pairs / re-anchored on
+  the as-of grid (lookups only; vanilla re-anchoring rule);
+  `rainbow_bump_greeks` → RainbowBumpGreeks (SS spot block ±1%/±2% singles
+  → delta/gamma/speed + pair corners → cross-gammas; ±1σ dgrid factor
+  pairs → exposures + free curvatures; 4-corner spot×factor crosses
+  composing the strike shift ON the factor-shocked grid via
+  `strike_shift_dgrid(extra=...)`; one factor-mean reval);
+  `rainbow_bump_pnl` = the zero-valuation projection (cube on, quad off —
+  quad="all" widens VaR gaps here too). Factor models fit ONCE on the full
+  joint history, shared across as-of dates (frozen-weights convention):
+  per-index corr-weighted PCA k≤6 (evr3 SPX 0.857/SX5E 0.861/HSI 0.873) +
+  joint 312-dim fit k≤8 (evr3 0.705); μ shared per index ⇒ one mean reval
+  serves both families. Caches per date via `scripts/run_rainbow_var.py`
+  (skip-if-cached, shares factory/fits/scenarios): 
+  `data/rainbow_var_scen_<asof>.csv` (per-scenario pnl_full + 26 scores) +
+  `rainbow_var_greeks_<asof>.npz`; panel notebook `rainbow_var.ipynb`
+  (off-cache, ~2 s; the dual screen is notebook-level analysis — the
+  hybrid's replacement values come from the cached sweep, which is exactly
+  what a real partial reval would compute since the screen uses only
+  greeks-side ranks). Tests `tests/test_rainbow_var.py` (6): flat-world
+  zero-P&L identity, pure-spot scenario ≡ the SS bump combo to 1e-9, bump
+  spot block ≡ `book_greeks` to 1e-9, exposure+curvature telescoping ≡
+  full reval to 1e-6. Pitfalls for the record: hedged-gap magnitude
+  anti-correlates with hedged-VaR size (long-gamma books have small hedged
+  VaR ⇒ big relative gaps, $40–80k absolute); the dual rank matters
+  because Taylor overshoots big-dS scenarios conservatively while
+  vol-driven true-tail scenarios can rank lower; per-date profiles:
+  2020-03-16 mark −$1.6M u99 $515k h99 $205k, 2021-09-20 −$16.6M/$2.12M/
+  $183k, 2022-03-16 −$4.8M/$1.69M/$636k, 2024-10-08 −$22.9M/$1.70M/$140k,
+  2026-07-31 −$20.6M/$2.46M/$202k.
+
 ## 2026-08-06 — Sticky-strike attribution + the measured hedge verdict: SS delta cuts hedged risk 43%
 
 - The follow-through on the greeks work: re-cut the rainbow book's daily

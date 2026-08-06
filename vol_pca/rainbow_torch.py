@@ -59,6 +59,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the gpu 
 
 from vol_pca.rainbow import (K_HI, K_LO, NOTIONAL, WEIGHTS, historical_corr,
                              spot_panel)
+from vol_pca.surface import MONEYNESS, TTM_PILLARS, grid_lookup
 
 _EPS = 1e-16                     # cdf clip for normal scores, as in rainbow.py
 
@@ -452,7 +453,7 @@ class MarginalFactory:
         psi = torch.special.ndtri(cdf.clamp(_EPS, 1.0 - _EPS))
         return x, cdf, psi
 
-    def strike_shift_dgrid(self, name, di, eps):
+    def strike_shift_dgrid(self, name, di, eps, extra=None):
         """Sticky-strike spot-bump surface for one underlying: under
         S -> S*(1+eps) with vols pinned per STRIKE, the moneyness-quoted
         surface must read sigma_new(m) = sigma_old(m*(1+eps)) — the
@@ -462,11 +463,21 @@ class MarginalFactory:
         additive pillar shock (8, 13) for tables(dgrid=...); sampling
         clamps at the quoted 50/150 edges (vanilla convention). A flat
         smile shifts onto itself: the shock is exactly zero, which is
-        what makes sticky-strike == sticky-moneyness in a flat world."""
+        what makes sticky-strike == sticky-moneyness in a flat world.
+
+        extra: additive (8, 13) pillar shock composed BEFORE the shift —
+        the shifted smile is (grid + extra) sampled at m*(1+eps), i.e. a
+        vol shock held fixed per STRIKE under the spot bump (var.py's
+        book_reval_fn convention for the spot x factor cross corners:
+        lookups frozen at base moneyness = pinned per strike). extra=None
+        reproduces the plain spot bump."""
         grid = self.grids[name][di]
+        if extra is not None:
+            grid = grid + torch.as_tensor(extra, dtype=torch.float64,
+                                          device=self.device)
         mon = (self.mon_knots * (1.0 + eps)).clamp(self.mon_lo, self.mon_hi)
         w = _cardinal_w(self.c_mon, self.mon_knots, mon)
-        return grid @ w.T - grid
+        return grid @ w.T - self.grids[name][di]
 
     def batch(self, tbls, g, df, chol):
         """Assemble a QuadBatch from three per-index `tables()` results.
@@ -490,6 +501,52 @@ def _intrinsic(g, weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI, notional=NOTIONAL):
     return (bkt - k_lo).clamp(0.0, k_hi - k_lo) * notional
 
 
+def _asof_t(d64, asof):
+    """Resolve `asof` (None = last, int index, or a joint quote date) to the
+    index t into the joint-date axis."""
+    if asof is None:
+        return len(d64) - 1
+    if isinstance(asof, (int, np.integer)):
+        return int(asof)
+    t = int(np.searchsorted(d64, np.datetime64(asof, "D")))
+    if t >= len(d64) or d64[t] != np.datetime64(asof, "D"):
+        raise KeyError(f"{asof} not a joint quote date")
+    return t
+
+
+def _asof_book(sds, asof=None, n_slots=256, device=None, corr_horizon=5,
+               corr=None, fac=None):
+    """The fixed as-of book every greeks/VaR driver shares — mark semantics:
+    every vintage sold before `asof` and unexpired at `asof` (the
+    prepare_book_greeks convention). Returns the device-ready state: date
+    index t, per-name grid-date indices di, per-vintage tau/g0/slots, USD
+    discounts, cholesky and factory."""
+    dev = device or default_device()
+    spots = spot_panel(sds)
+    names = list(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    t = _asof_t(d64, asof)
+    di = {n: int(np.searchsorted(sds[n].dates, d64[t])) for n in names}
+    if corr is None:
+        corr = historical_corr(spots, corr_horizon).to_numpy()
+    chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
+                           dtype=torch.float64, device=dev)
+    fac = fac or MarginalFactory(sds, device=dev)
+    expiry = d64 + np.timedelta64(365, "D")
+    s_idx = np.nonzero(expiry[:t] > d64[t])[0]
+    if not len(s_idx):
+        raise ValueError(f"empty book at {spots.index[t].date()}")
+    tau = (expiry[s_idx] - d64[t]).astype(float) / 365.0
+    sp = spots.to_numpy()
+    g0 = torch.as_tensor(sp[t] / sp[s_idx], dtype=torch.float64, device=dev)
+    df = fac.discount(names[0], di[names[0]], tau)
+    slots = torch.as_tensor(s_idx % n_slots, device=dev)
+    return {"device": dev, "names": names, "t": t, "d64": d64, "di": di,
+            "s_idx": s_idx, "tau": tau, "g0": g0, "df": df, "slots": slots,
+            "chol": chol, "fac": fac, "n_pos": len(s_idx),
+            "date": spots.index[t]}
+
+
 def prepare_book_greeks(sds, asof=None, eps=0.01, mode="sticky_strike",
                         n_slots=256, device=None, corr_horizon=5, corr=None,
                         fac=None):
@@ -511,33 +568,11 @@ def prepare_book_greeks(sds, asof=None, eps=0.01, mode="sticky_strike",
     """
     if mode not in ("sticky_strike", "sticky_moneyness"):
         raise ValueError(f"unknown mode {mode!r}")
-    dev = device or default_device()
-    spots = spot_panel(sds)
-    names = list(sds)
-    d64 = spots.index.values.astype("datetime64[D]")
-    if asof is None:
-        t = len(d64) - 1
-    elif isinstance(asof, (int, np.integer)):
-        t = int(asof)
-    else:
-        t = int(np.searchsorted(d64, np.datetime64(asof, "D")))
-        if t >= len(d64) or d64[t] != np.datetime64(asof, "D"):
-            raise KeyError(f"{asof} not a joint quote date")
-    di = {n: int(np.searchsorted(sds[n].dates, d64[t])) for n in names}
-    if corr is None:
-        corr = historical_corr(spots, corr_horizon).to_numpy()
-    chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
-                           dtype=torch.float64, device=dev)
-    fac = fac or MarginalFactory(sds, device=dev)
-    expiry = d64 + np.timedelta64(365, "D")
-    s_idx = np.nonzero(expiry[:t] > d64[t])[0]
-    if not len(s_idx):
-        raise ValueError(f"empty book at {spots.index[t].date()}")
-    tau = (expiry[s_idx] - d64[t]).astype(float) / 365.0
-    sp = spots.to_numpy()
-    g0 = torch.as_tensor(sp[t] / sp[s_idx], dtype=torch.float64, device=dev)
-    df = fac.discount(names[0], di[names[0]], tau)
-    slots = torch.as_tensor(s_idx % n_slots, device=dev)
+    bk = _asof_book(sds, asof, n_slots, device, corr_horizon, corr, fac)
+    dev, names, fac = bk["device"], bk["names"], bk["fac"]
+    di, tau, g0, df, slots = (bk["di"], bk["tau"], bk["g0"], bk["df"],
+                              bk["slots"])
+    chol = bk["chol"]
 
     tbl = {}
     for j, n in enumerate(names):
@@ -564,7 +599,7 @@ def prepare_book_greeks(sds, asof=None, eps=0.01, mode="sticky_strike",
                 for sb in (1, -1):
                     batches[("x", a, sa, b, sb)] = mk({a: sa, b: sb})
     return {"batches": batches, "slots": slots, "names": names, "eps": eps,
-            "mode": mode, "n_pos": len(s_idx), "date": spots.index[t],
+            "mode": mode, "n_pos": bk["n_pos"], "date": bk["date"],
             "chol": chol, "fac": fac}
 
 
@@ -964,3 +999,327 @@ def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
             print(f"  {t}/{len(d64) - 1} {spots.index[t].date()} "
                   f"n_pos={len(s_idx)}", flush=True)
     return pd.DataFrame(rows).set_index("date")
+
+
+# ---------------------------------------------------------------------------
+# Historical 1-day VaR on the rainbow book: nested full revaluation vs the
+# formula-free bumped-greeks projection (the vanilla var.py design, three
+# underlyings). A scenario is a historical joint-date pair: per-index spot
+# ratios, per-index fixed-moneyness pillar-grid changes, and the calendar
+# gap dt. Applied to the as-of book the scenario state is simply
+# tables(dgrid=dgrid_scen, tau=tau-dt, tau_price=tau) at g0*ratio — the
+# additive fixed-moneyness shock read at the new spot's moneyness (the
+# factory's x-grid) reproduces var.full_reval_pnl's composition, and the
+# attribution's eq+vol identity (both applied = plain day-t tables at g1)
+# is the proof that no strike shift belongs here. Curves stay frozen at
+# the as-of date: scenario P&L is spot + vol + roll-down shock only, no
+# theta/funding (tau_price frozen), no rate/div/forward-curve shocks
+# (attribution: fwd daily std ~4% of pl std, rate ~0.4%).
+
+
+@dataclass
+class RainbowScenarios:
+    """One scenario per historical joint-date move t-1 -> t."""
+    dates: np.ndarray            # (S,) day-t timestamps
+    ratio: np.ndarray            # (S, 3) per-index spot ratios, sds order
+    dgrid: dict                  # name -> (S, 8, 13) fixed-moneyness changes
+    dt: np.ndarray               # (S,) calendar-day gap / 365
+    names: list
+
+    def __len__(self):
+        return len(self.ratio)
+
+
+def rainbow_scenarios(sds):
+    spots = spot_panel(sds)
+    names = list(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    di = {n: np.searchsorted(sds[n].dates, d64) for n in names}
+    sp = spots.to_numpy()
+    dgrid = {n: sds[n].grids[di[n][1:]] - sds[n].grids[di[n][:-1]]
+             for n in names}
+    return RainbowScenarios(
+        dates=spots.index[1:].values, ratio=sp[1:] / sp[:-1], dgrid=dgrid,
+        dt=(d64[1:] - d64[:-1]).astype(float) / 365.0, names=names)
+
+
+def rainbow_var_full(sds, scen=None, asof=None, n_paths=512, n_slots=256,
+                     seed=1, device=None, chunk=8, engine="sobol",
+                     quad_nodes=(24, 24), weights=WEIGHTS, k_lo=K_LO,
+                     k_hi=K_HI, notional=NOTIONAL, corr_horizon=5, corr=None,
+                     fac=None, progress=None):
+    """Nested full revaluation: every scenario rebuilds all three indices'
+    marginal tables from the shocked pillar grids (dgrid seam, per-problem
+    (B, 8, 13) shocks) at the dt-decayed lookup TTM with the pricing TTM
+    frozen (two-tau seam), scales each vintage's seasoning by the scenario
+    spot ratios, and reprices the whole book. CRN discipline: every
+    vintage keeps its Sobol slot in every scenario, so scenario-vs-base
+    differences cancel the sampling noise. Scenarios are swept in chunks
+    of `chunk` x n_pos stacked problems (memory, not correctness).
+
+    Returns {pnl (S,) sold-book scenario P&L, pv0 sold mark, date, n_pos,
+    n_revals}."""
+    bk = _asof_book(sds, asof, n_slots, device, corr_horizon, corr, fac)
+    dev, names, fac, t = bk["device"], bk["names"], bk["fac"], bk["t"]
+    scen = scen if scen is not None else rainbow_scenarios(sds)
+    assert scen.names == names
+    di, tau0, g0, df0, slots = (bk["di"], bk["tau"], bk["g0"], bk["df"],
+                                bk["slots"])
+    V, S = len(tau0), len(scen)
+    if engine == "sobol":
+        zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+        P = lambda b, sl: price_sobol_batch(b, zsets, slots=sl,
+                                            weights=weights, k_lo=k_lo,
+                                            k_hi=k_hi, notional=notional)
+    else:
+        P = lambda b, sl: price_quad_batch(b, *quad_nodes, weights=weights,
+                                           k_lo=k_lo, k_hi=k_hi,
+                                           notional=notional)
+    pv_base = P(fac.batch([fac.tables(n, di[n], tau0) for n in names],
+                          g0, df0, bk["chol"]), slots)
+    v0 = float(pv_base.sum())
+    ratio_t = torch.as_tensor(scen.ratio, dtype=torch.float64, device=dev)
+    pnl = np.empty(S)
+    for c0 in range(0, S, chunk):
+        c1 = min(c0 + chunk, S)
+        C = c1 - c0
+        tau_l = np.maximum(tau0[None, :] - scen.dt[c0:c1, None], 1e-6).ravel()
+        tau_p = np.tile(tau0, C)
+        tbls = [fac.tables(n, di[n], tau_l, tau_price=tau_p,
+                           dgrid=torch.as_tensor(scen.dgrid[n][c0:c1],
+                                                 dtype=torch.float64,
+                                                 device=dev)
+                           .repeat_interleave(V, 0))
+                for n in names]
+        g = (g0[None, :, :] * ratio_t[c0:c1, None, :]).reshape(-1, 3)
+        pv = P(fac.batch(tbls, g, df0.repeat(C), bk["chol"]),
+               slots.repeat(C)).view(C, V).sum(1)
+        pnl[c0:c1] = -(pv - v0).cpu().numpy()          # sold book
+        if progress and (c0 // chunk) % progress == 0:
+            print(f"  scenario {c0}/{S}", flush=True)
+    return {"pnl": pnl, "pv0": -v0, "date": bk["date"], "n_pos": V,
+            "n_revals": S, "t": t}
+
+
+def rainbow_fit_dsigma(sds, interp="cubic"):
+    """Per-index daily pillar changes in the roll-in sticky-strike basis
+    over the JOINT dates — the rainbow factor-fit sample, mirroring
+    factors.sticky_strike_dsigma(include_roll=True) pair for pair with
+    rainbow_scenarios (same dates, ratios and dt). Returns
+    {name: (S, 104)}."""
+    spots = spot_panel(sds)
+    names = list(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    di = {n: np.searchsorted(sds[n].dates, d64) for n in names}
+    sp = spots.to_numpy()
+    nt, nm = len(TTM_PILLARS), len(MONEYNESS)
+    out = {n: np.empty((len(d64) - 1, nt * nm)) for n in names}
+    for t in range(1, len(d64)):
+        dt = float((d64[t] - d64[t - 1]).astype(float)) / 365.0
+        ttm_q = np.repeat(TTM_PILLARS - dt, nm)
+        for j, n in enumerate(names):
+            mon_q = np.tile(np.clip(MONEYNESS * (sp[t - 1, j] / sp[t, j]),
+                                    MONEYNESS[0], MONEYNESS[-1]), nt)
+            out[n][t - 1] = (grid_lookup(sds[n].grids[di[n][t]], ttm_q, mon_q,
+                                         interp=interp)
+                             - sds[n].grids[di[n][t - 1]].ravel())
+    return out
+
+
+def rainbow_scenario_dsigma(sds, scen=None, asof=None, interp="cubic"):
+    """Each scenario's per-index pillar move re-anchored on the AS-OF
+    surface (var.scenario_dsigma): the shocked as-of grid sampled at the
+    pillar strikes' new moneyness (m / ratio) and dt-decayed TTM, minus
+    the base pillar vols. Grid lookups only — no valuations. Returns
+    {name: (S, 104)}."""
+    bk_names = list(sds)
+    scen = scen if scen is not None else rainbow_scenarios(sds)
+    spots = spot_panel(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    t = _asof_t(d64, asof)
+    nt, nm = len(TTM_PILLARS), len(MONEYNESS)
+    out = {}
+    for j, n in enumerate(bk_names):
+        base = sds[n].grids[int(np.searchsorted(sds[n].dates, d64[t]))]
+        rows = np.empty((len(scen), nt * nm))
+        for s in range(len(scen)):
+            ttm_q = np.repeat(TTM_PILLARS - scen.dt[s], nm)
+            mon_q = np.tile(np.clip(MONEYNESS / scen.ratio[s, j],
+                                    MONEYNESS[0], MONEYNESS[-1]), nt)
+            rows[s] = (grid_lookup(base + scen.dgrid[n][s], ttm_q, mon_q,
+                                   interp=interp) - base.ravel())
+        out[n] = rows
+    return out
+
+
+@dataclass
+class RainbowBumpGreeks:
+    """Every sensitivity of the formula-free rainbow projection, measured
+    purely by CRN bumped revaluations, sold-book sign throughout."""
+    pv0: float                   # sold mark
+    delta: np.ndarray            # (3,) dV per unit relative move dS/S
+    gamma: np.ndarray            # (3, 3) symmetric, incl. cross-gammas
+    speed: np.ndarray            # (3,) diagonal third derivatives
+    base_mu: float               # value change under the factor-mean move
+    expos: np.ndarray            # (F,) dV/df per unit score
+    curv: np.ndarray             # (F,) d2V/df^2, free from the pairs
+    cross: np.ndarray            # (n_cross,) d2V/(dS/S)df
+    cross_spec: tuple            # ((spot_idx, factor_idx), ...)
+    eps: np.ndarray              # (F,) score-unit bump sizes used
+    eps_spot: float
+    names: list
+    date: object
+    n_pos: int
+    n_revals: int
+
+
+def rainbow_bump_greeks(sds, factors, eps, asof=None, mu=None, cross=(),
+                        eps_spot=0.01, n_paths=512, n_slots=256, seed=1,
+                        device=None, engine="sobol", quad_nodes=(24, 24),
+                        weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI,
+                        notional=NOTIONAL, corr_horizon=5, corr=None,
+                        fac=None):
+    """The greeks pass of the rainbow bump path — var.bump_greeks with
+    three spots and per-index/joint vol factors, priced only through the
+    batched engines (no closed-form greeks exist for this book).
+
+    factors: list of unit-score directions, each {name: (8, 13) array}
+    (an entry touches only the indices it names — a per-index PCA factor
+    has one key, a joint factor three); eps: (F,) score bump sizes
+    (1 sigma of each factor's fit-sample score). mu: {name: (8, 13)}
+    factor-mean move or None. cross: ((spot_idx, factor_idx), ...) 4-corner
+    spot x factor terms.
+
+    Spot block: sticky-strike bumps (strike_shift_dgrid + seasoning
+    scale) — vols pinned per strike, the plain-BS-delta analog that pairs
+    with slide-carrying sticky-strike factor scores (using the
+    sticky-moneyness/autograd delta here would double-count the slide,
+    var.py's book_reval_fn warning). +-1eps and +-2eps singles give
+    delta/gamma/speed; pair corners give cross-gammas; factor pairs give
+    exposures + free curvatures; cross corners compose the strike shift
+    ON the factor-shocked grid (strike_shift_dgrid(extra=...), the shock
+    held fixed per strike under the spot bump).
+
+    Budget: 2 + 12 spot + 12 corners + 2F factor pairs + 4*|cross|
+    pricings, each a base-CRN difference."""
+    bk = _asof_book(sds, asof, n_slots, device, corr_horizon, corr, fac)
+    dev, names, fac = bk["device"], bk["names"], bk["fac"]
+    di, tau0, g0, df0, slots = (bk["di"], bk["tau"], bk["g0"], bk["df"],
+                                bk["slots"])
+    F = len(factors)
+    eps = np.broadcast_to(np.asarray(eps, dtype=float), (F,))
+    if engine == "sobol":
+        zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+        P = lambda b: price_sobol_batch(b, zsets, slots=slots,
+                                        weights=weights, k_lo=k_lo, k_hi=k_hi,
+                                        notional=notional)
+    else:
+        P = lambda b: price_quad_batch(b, *quad_nodes, weights=weights,
+                                       k_lo=k_lo, k_hi=k_hi,
+                                       notional=notional)
+    t64 = lambda a: torch.as_tensor(np.asarray(a, dtype=float),
+                                    dtype=torch.float64, device=dev)
+    T0 = {n: fac.tables(n, di[n], tau0) for n in names}
+    n_revals = 0
+
+    def val(tbl_by_name, spot_shifts):
+        """Sold-book value: tables override per name, seasoning scaled on
+        spot-shifted indices."""
+        nonlocal n_revals
+        n_revals += 1
+        g = g0.clone()
+        for j, e in spot_shifts.items():
+            g[:, j] = g[:, j] * (1.0 + e)
+        b = fac.batch([tbl_by_name.get(n, T0[n]) for n in names], g, df0,
+                      bk["chol"])
+        return -float(P(b).sum())
+
+    v0 = val({}, {})
+    base_mu = (val({n: fac.tables(n, di[n], tau0, dgrid=t64(mu[n]))
+                    for n in mu}, {}) - v0) if mu is not None else 0.0
+
+    e = eps_spot
+    tsp = {(j, s): fac.tables(names[j], di[names[j]], tau0,
+                              dgrid=fac.strike_shift_dgrid(names[j],
+                                                           di[names[j]],
+                                                           s * e))
+           for j in range(3) for s in (1, -1, 2, -2)}
+    vsp = {(j, s): val({names[j]: tsp[(j, s)]}, {j: s * e})
+           for j in range(3) for s in (1, -1, 2, -2)}
+    delta = np.array([(vsp[(j, 1)] - vsp[(j, -1)]) / (2 * e)
+                      for j in range(3)])
+    gamma = np.diag([(vsp[(j, 1)] - 2 * v0 + vsp[(j, -1)]) / e ** 2
+                     for j in range(3)])
+    speed = np.array([(vsp[(j, 2)] - 2 * vsp[(j, 1)] + 2 * vsp[(j, -1)]
+                       - vsp[(j, -2)]) / (2 * e ** 3) for j in range(3)])
+    for a in range(3):
+        for b in range(a + 1, 3):
+            gamma[a, b] = gamma[b, a] = (
+                val({names[a]: tsp[(a, 1)], names[b]: tsp[(b, 1)]},
+                    {a: e, b: e})
+                - val({names[a]: tsp[(a, 1)], names[b]: tsp[(b, -1)]},
+                      {a: e, b: -e})
+                - val({names[a]: tsp[(a, -1)], names[b]: tsp[(b, 1)]},
+                      {a: -e, b: e})
+                + val({names[a]: tsp[(a, -1)], names[b]: tsp[(b, -1)]},
+                      {a: -e, b: -e})) / (4 * e ** 2)
+
+    tfac, expos, curv = {}, np.empty(F), np.empty(F)
+    for f, dirs in enumerate(factors):
+        for s in (1, -1):
+            tfac[(f, s)] = {n: fac.tables(n, di[n], tau0,
+                                          dgrid=t64(s * eps[f] * dirs[n]))
+                            for n in dirs}
+        up, dn = val(tfac[(f, 1)], {}), val(tfac[(f, -1)], {})
+        expos[f] = (up - dn) / (2 * eps[f])
+        curv[f] = (up - 2 * v0 + dn) / eps[f] ** 2
+
+    xvals = np.empty(len(cross))
+    for i, (j, f) in enumerate(cross):
+        nj, dirs = names[j], factors[f]
+        corners = 0.0
+        for sj in (1, -1):
+            for sf in (1, -1):
+                tbl = {n: tfac[(f, sf)][n] for n in dirs if n != nj}
+                shock = (sf * eps[f] * dirs[nj]) if nj in dirs else None
+                tbl[nj] = fac.tables(
+                    nj, di[nj], tau0,
+                    dgrid=fac.strike_shift_dgrid(
+                        nj, di[nj], sj * e,
+                        extra=None if shock is None else t64(shock)))
+                corners += sj * sf * val(tbl, {j: sj * e})
+        xvals[i] = corners / (4 * e * eps[f])
+
+    return RainbowBumpGreeks(
+        pv0=v0, delta=delta, gamma=gamma, speed=speed, base_mu=base_mu,
+        expos=expos, curv=curv, cross=xvals, cross_spec=tuple(cross),
+        eps=np.array(eps), eps_spot=e, names=names, date=bk["date"],
+        n_pos=bk["n_pos"], n_revals=n_revals)
+
+
+def rainbow_bump_pnl(bg, ratio, scores, sel=None, cube=True, quad=None):
+    """Scenario P&L from a RainbowBumpGreeks pass — zero further
+    valuations:
+
+        delta.rho + rho'gamma rho/2 [+ speed.rho^3/6]
+        + base_mu + sum_{f in sel} E_f f_f + sum_(j,f in sel) X_jf f_f rho_j
+
+    ratio: (S, 3) scenario spot ratios; scores: (S, F) factor scores
+    aligned with bg.expos (from rainbow_scenario_dsigma + fitted models);
+    sel: active factor indices (default all) — the truncation knob;
+    cube/quad follow var.bump_pnl (cube on, quad off for VaR)."""
+    rho = np.atleast_2d(np.asarray(ratio, dtype=float)) - 1.0
+    sel = np.arange(len(bg.expos)) if sel is None else np.asarray(sel)
+    est = (rho @ bg.delta
+           + 0.5 * np.einsum("si,ij,sj->s", rho, bg.gamma, rho)
+           + bg.base_mu + scores[:, sel] @ bg.expos[sel])
+    if cube:
+        est = est + rho ** 3 @ (bg.speed / 6.0)
+    for (j, f), x in zip(bg.cross_spec, bg.cross):
+        if f in sel:
+            est = est + x * scores[:, f] * rho[:, j]
+    if quad == "all":
+        est = est + 0.5 * scores[:, sel] ** 2 @ bg.curv[sel]
+    elif quad is not None:
+        raise ValueError(f"unknown quad {quad!r}")
+    return est
