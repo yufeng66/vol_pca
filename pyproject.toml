@@ -16,6 +16,27 @@ dependencies = [
 dev = [
     "pytest>=8",
 ]
+gpu = [
+    # CUDA build of torch for the batched rainbow-quadrature engine
+    # (vol_pca/rainbow_torch.py). Pinned to the exact version vix_refactor
+    # verified on this machine (Python 3.14 + cu130); the +cu130 wheel comes
+    # from the PyTorch index configured below. The numpy engines remain
+    # canonical — nothing outside rainbow_torch.py imports torch.
+    "torch==2.12.0",
+]
+
+[tool.uv]
+default-groups = ["dev", "gpu"]
+
+[tool.uv.sources]
+# Resolve torch from the CUDA 13.0 PyTorch index on Linux/Windows so
+# `uv sync` installs the GPU build; other platforms fall back to PyPI (CPU).
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
