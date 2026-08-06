@@ -13,9 +13,10 @@ from vol_pca.data import load_surfaces
 from vol_pca.rainbow import (date_index, historical_corr, implied_marginal,
                              price_rainbow, price_rainbow_quad, spot_panel)
 from vol_pca.rainbow_torch import (MarginalFactory, QuadBatch, QuadProblem,
+                                   book_greeks, prepare_book_greeks,
                                    price_quad_batch, price_rainbow_quad_torch,
                                    price_sobol_batch, rainbow_attribution,
-                                   sobol_normals)
+                                   rainbow_book_greeks, sobol_normals)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV3 = [ROOT / f"{n}_volSurface.csv" for n in ("SPX", "SX5E", "HSI")]
@@ -328,3 +329,73 @@ def test_real_surface_batch_matches_numpy():
     ref = [price_rainbow_quad(list(p.marginals), p.corr, p.df,
                               perf_to_date=p.perf_to_date)["pv"] for p in probs]
     assert np.abs(pv - np.array(ref)).max() < 0.05
+
+
+def test_strike_shift_dgrid_matches_scipy():
+    # the shifted-smile pillar shock is exactly CubicSpline(mon, row) sampled
+    # at mon*(1+eps) minus the row, per TTM pillar, clamped at the edges
+    from scipy.interpolate import CubicSpline
+
+    sd = _flat_sd(n_days=2, vol=0.2)
+    grids = sd.grids.copy()
+    mon = np.asarray(sd.moneyness, dtype=float)
+    grids[:] = 0.2 + 0.0005 * (100.0 - mon)[None, None, :] \
+        + 0.01 * np.linspace(0.0, 1.0, grids.shape[1])[None, :, None]
+    sd = dataclasses.replace(sd, grids=grids)
+    fac = MarginalFactory({"A": sd, "B": sd, "C": sd}, device="cpu")
+    for eps in (0.01, -0.01):
+        dg = fac.strike_shift_dgrid("A", 0, eps).cpu().numpy()
+        for r in range(grids.shape[1]):
+            row = grids[0, r]
+            ref = CubicSpline(mon, row)(np.clip(mon * (1.0 + eps),
+                                                mon[0], mon[-1])) - row
+            assert np.abs(dg[r] - ref).max() < 1e-13
+
+
+def test_book_greeks_flat_world():
+    # flat smiles: the sticky-strike shift is exactly zero, so both
+    # frameworks must produce identical greeks; sold call-spread book has
+    # negative delta; bump-measured sticky-moneyness delta matches the
+    # pathwise autograd delta (same point sets, kink effect is O(eps^2))
+    flat = {n: _flat_sd(n_days=5, vol=v, spot=s)
+            for n, v, s in zip("ABC", (0.2, 0.25, 0.3), (100.0, 90.0, 80.0))}
+    corr = np.array([[1.0, 0.6, 0.4], [0.6, 1.0, 0.5], [0.4, 0.5, 1.0]])
+    fac = MarginalFactory(flat, device="cpu")
+    assert float(fac.strike_shift_dgrid("A", 0, 0.01).abs().max()) < 1e-14
+    kw = dict(corr=corr, n_paths=512, device="cpu", fac=fac)
+    ss = rainbow_book_greeks(flat, mode="sticky_strike", **kw)
+    sm = rainbow_book_greeks(flat, mode="sticky_moneyness", **kw)
+    assert np.allclose(ss["delta"], sm["delta"], rtol=1e-9)
+    assert np.allclose(ss["gamma"], sm["gamma"], rtol=1e-6, atol=1e-3)
+    assert (ss["delta"] < 0).all()
+    assert np.allclose(ss["gamma"], ss["gamma"].T)
+
+    state = prepare_book_greeks(flat, mode="sticky_moneyness", device="cpu",
+                                corr=corr, fac=fac)
+    z = sobol_normals(256, 512, seed=1, device="cpu")
+    base = state["batches"]["base"]
+    g = base.g.clone().requires_grad_(True)
+    b2 = QuadBatch(x=base.x, cdf=base.cdf, psi=base.psi, chol=base.chol,
+                   g=g, df=base.df)
+    price_sobol_batch(b2, z, slots=state["slots"]).sum().backward()
+    d_auto = -(g.grad * base.g).sum(0).cpu().numpy()
+    assert np.abs(sm["delta"] / d_auto - 1.0).max() < 5e-3
+
+
+@pytest.mark.skipif(not all(p.exists() for p in CSV3),
+                    reason="vol surface data not present")
+def test_book_greeks_sobol_vs_quad_real():
+    # CRN Sobol finite differences agree with the zero-variance quadrature
+    # finite differences: delta to relative %, gamma to P&L materiality
+    # (|diff| * eps^2 = the second-order P&L error on a 1% joint move)
+    sds = {p.name.split("_")[0]: load_surfaces(p) for p in CSV3}
+    kw = dict(asof=30, eps=0.01, device="cpu")   # young 30-vintage book
+    sb = rainbow_book_greeks(sds, n_paths=2048, **kw)
+    qd = rainbow_book_greeks(sds, engine="quad", **kw)
+    assert sb["n_pos"] == 30
+    assert np.abs(sb["delta"] / qd["delta"] - 1.0).max() < 0.02
+    assert np.abs((sb["gamma"] - qd["gamma"]) * 0.01 ** 2).max() < 2e3
+    # the ranked pair's kink concentrates cross gamma: positive for the
+    # sold book, symmetric by construction
+    assert sb["gamma"][0, 1] == sb["gamma"][1, 0]
+    assert sb["gamma"][0, 1] > 0

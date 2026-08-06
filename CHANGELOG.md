@@ -10,6 +10,46 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-06 — Sticky-strike bump greeks: the cross-gamma matrix is the book's main convexity
+
+- How should the rainbow book's hedging greeks be computed — delta vector and
+  gamma matrix including cross terms, in which spot framework, and how many
+  paths do they need? Built the sticky-strike bump route (user spec): each
+  index's 1% spot bump **re-derives that index's implied distribution from
+  the moneyness-shifted smile** (σ_new(m) = σ_old(m(1+ε))) and scales its
+  seasoning; 19 CRN pricings per book. Findings: the **SPX–SX5E cross gamma
+  ($207M/100%²) dwarfs every diagonal ($9–35M)** — the ranked weights carry
+  0.1·|P₁−P₂| whose second derivative is a δ-ridge along P₁=P₂, so
+  per-underlying gammas miss the book's dominant second-order risk; the
+  sticky-strike vs sticky-moneyness delta gap is 1–3.5% ($1.4M of SPX hedge);
+  **512 paths are comfortably enough for the whole matrix** (greeks converge
+  better than the price under CRN); and on crash surfaces the trust order
+  inverts — CRN-Sobol finite differences beat the quadrature's (COVID quad
+  delta oscillates −4.8→−8.2→−5.9M across 24²/32²/48² nodes while ten Sobol
+  families agree at −6.13±0.02M).
+- Record: `MarginalFactory.strike_shift_dgrid` (cardinal-weight resampling of
+  the pillar rows at m(1+ε), clamped 50/150; exactly zero on a flat smile ⇒
+  SS ≡ SM there, tested), `prepare_book_greeks` (19 batches: base, ±ε per
+  index, 4 corners per pair; mark-semantics book; mode switches SS/SM),
+  `book_greeks` (any pricer; sold-book sign; delta/(2ε), diag (V₊−2V₀+V₋)/ε²,
+  cross 4-corner/(4ε²)), `rainbow_book_greeks` wrapper (sobol default
+  512/quad engines). Gamma cannot come from autograd through the sampler —
+  payoff pathwise piecewise-linear ⇒ Hessian 0 a.e.; SM bump delta matches
+  the pathwise autograd delta to ≤0.12% at ε=1%. ε-sensitivity (quad):
+  delta flat to 0.2% over ε∈[0.5%,2%], big cross −3% (210→204), small SPX
+  diagonal window-dependent (15.8→11.6) → quote gammas as ±1%-window
+  convexities. Five-date sweep: 2019 ramp book short gamma (diag −70/−77M),
+  COVID book delta collapsed to (−6.1,−4.2,−3.6)M with +98M SPX diag and
+  negative crosses, 2024-08-05 asymmetric (−47.9 vs −30.3). Convergence (10
+  scramble families × N∈{64…4096} × 5 dates): at 512 paths worst delta std
+  $45–67k → ≤$673 P&L per 1% move (0.026bp of book notional); worst gamma
+  element → ≤$313 on a joint 1% day (0.012bp); ~N^0.75–1.0 decay. Cost:
+  19 pricings + 6 shifted table builds ≈ 0.1s/book at 512. Tests:
+  `test_strike_shift_dgrid_matches_scipy` (1e-13),
+  `test_book_greeks_flat_world`, `test_book_greeks_sobol_vs_quad_real`.
+  Notebook: `rainbow_greeks.ipynb` (16 cells, executed). Standing decision
+  recorded same day: 512 Sobol paths is the book-level default.
+
 ## 2026-08-06 — Sobol path count for book marks: 256 is enough, 2,048 is 10× inside
 
 - How many paths does one valuation of the ~258-option rainbow book need, if

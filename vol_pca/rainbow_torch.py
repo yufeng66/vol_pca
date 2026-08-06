@@ -452,6 +452,22 @@ class MarginalFactory:
         psi = torch.special.ndtri(cdf.clamp(_EPS, 1.0 - _EPS))
         return x, cdf, psi
 
+    def strike_shift_dgrid(self, name, di, eps):
+        """Sticky-strike spot-bump surface for one underlying: under
+        S -> S*(1+eps) with vols pinned per STRIKE, the moneyness-quoted
+        surface must read sigma_new(m) = sigma_old(m*(1+eps)) — the
+        vanilla sticky_strike_dsigma sampling (m * S0/S1) applied to the
+        pillar rows before the table build, so the bump re-derives the
+        whole implied distribution from the shifted smile. Returns the
+        additive pillar shock (8, 13) for tables(dgrid=...); sampling
+        clamps at the quoted 50/150 edges (vanilla convention). A flat
+        smile shifts onto itself: the shock is exactly zero, which is
+        what makes sticky-strike == sticky-moneyness in a flat world."""
+        grid = self.grids[name][di]
+        mon = (self.mon_knots * (1.0 + eps)).clamp(self.mon_lo, self.mon_hi)
+        w = _cardinal_w(self.c_mon, self.mon_knots, mon)
+        return grid @ w.T - grid
+
     def batch(self, tbls, g, df, chol):
         """Assemble a QuadBatch from three per-index `tables()` results.
         chol: one (3, 3) lower cholesky shared by every problem."""
@@ -472,6 +488,142 @@ def _intrinsic(g, weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI, notional=NOTIONAL):
     bkt = (w_b * torch.maximum(g[:, 0], g[:, 1])
            + w_w * torch.minimum(g[:, 0], g[:, 1]) + w3 * g[:, 2])
     return (bkt - k_lo).clamp(0.0, k_hi - k_lo) * notional
+
+
+def prepare_book_greeks(sds, asof=None, eps=0.01, mode="sticky_strike",
+                        n_slots=256, device=None, corr_horizon=5, corr=None,
+                        fac=None):
+    """Assemble the 19 bumped-revaluation batches for the as-of book's
+    spot delta vector and gamma/cross-gamma matrix: base, +-eps per
+    underlying (6), and the four corners of each pair (12). Book = mark
+    semantics: every vintage sold before `asof` (int index into the joint
+    dates, a date, or None for the last date) and unexpired at `asof`.
+
+    mode="sticky_strike": each index's spot bump scales its seasoning g
+    AND rebuilds that index's tables from the moneyness-shifted smile
+    (strike_shift_dgrid) — vols pinned per strike, a *different implied
+    distribution* per bumped scenario. mode="sticky_moneyness": tables
+    frozen, only g scales (the smile — the whole implied distribution —
+    rides with spot; this is what the attribution driver's eq step and
+    the autograd delta measure). The pricer/payoff is supplied at
+    evaluation time (book_greeks), so one prepared state serves both the
+    Sobol and quadrature engines and any path-count sweep.
+    """
+    if mode not in ("sticky_strike", "sticky_moneyness"):
+        raise ValueError(f"unknown mode {mode!r}")
+    dev = device or default_device()
+    spots = spot_panel(sds)
+    names = list(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    if asof is None:
+        t = len(d64) - 1
+    elif isinstance(asof, (int, np.integer)):
+        t = int(asof)
+    else:
+        t = int(np.searchsorted(d64, np.datetime64(asof, "D")))
+        if t >= len(d64) or d64[t] != np.datetime64(asof, "D"):
+            raise KeyError(f"{asof} not a joint quote date")
+    di = {n: int(np.searchsorted(sds[n].dates, d64[t])) for n in names}
+    if corr is None:
+        corr = historical_corr(spots, corr_horizon).to_numpy()
+    chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
+                           dtype=torch.float64, device=dev)
+    fac = fac or MarginalFactory(sds, device=dev)
+    expiry = d64 + np.timedelta64(365, "D")
+    s_idx = np.nonzero(expiry[:t] > d64[t])[0]
+    if not len(s_idx):
+        raise ValueError(f"empty book at {spots.index[t].date()}")
+    tau = (expiry[s_idx] - d64[t]).astype(float) / 365.0
+    sp = spots.to_numpy()
+    g0 = torch.as_tensor(sp[t] / sp[s_idx], dtype=torch.float64, device=dev)
+    df = fac.discount(names[0], di[names[0]], tau)
+    slots = torch.as_tensor(s_idx % n_slots, device=dev)
+
+    tbl = {}
+    for j, n in enumerate(names):
+        tbl[(j, 0)] = fac.tables(n, di[n], tau)
+        for s in (1, -1):
+            tbl[(j, s)] = (fac.tables(n, di[n], tau,
+                                      dgrid=fac.strike_shift_dgrid(n, di[n], s * eps))
+                           if mode == "sticky_strike" else tbl[(j, 0)])
+
+    def mk(shifts):
+        tbls = [tbl[(j, shifts.get(j, 0))] for j in range(len(names))]
+        g = g0.clone()
+        for j, s in shifts.items():
+            g[:, j] = g[:, j] * (1.0 + s * eps)
+        return fac.batch(tbls, g, df, chol)
+
+    batches = {"base": mk({})}
+    for j in range(len(names)):
+        for s in (1, -1):
+            batches[("d", j, s)] = mk({j: s})
+    for a in range(len(names)):
+        for b in range(a + 1, len(names)):
+            for sa in (1, -1):
+                for sb in (1, -1):
+                    batches[("x", a, sa, b, sb)] = mk({a: sa, b: sb})
+    return {"batches": batches, "slots": slots, "names": names, "eps": eps,
+            "mode": mode, "n_pos": len(s_idx), "date": spots.index[t],
+            "chol": chol, "fac": fac}
+
+
+def book_greeks(state, pricer):
+    """Evaluate a prepared bump set with any batch pricer
+    `(batch, slots) -> (B,) pv tensor`. Returns SOLD-book greeks w.r.t.
+    RELATIVE spot moves (dS/S; divide by 100 for per-1% numbers):
+    delta (n,), gamma (n, n) symmetric Hessian incl. cross terms, pv =
+    sold-book mark, and the raw pv_combos. Under the Sobol engine one
+    point-set family prices all 19 combos (CRN — the differences cancel
+    sampling noise). Gamma MUST come from these bumps: per path the
+    payoff is piecewise linear in g, so a pathwise/autograd second
+    derivative through the sampler is zero almost everywhere."""
+    pv = {k: float(pricer(b, state["slots"]).sum())
+          for k, b in state["batches"].items()}
+    e = state["eps"]
+    n = len(state["names"])
+    delta = np.zeros(n)
+    gamma = np.zeros((n, n))
+    for j in range(n):
+        delta[j] = -(pv[("d", j, 1)] - pv[("d", j, -1)]) / (2 * e)
+        gamma[j, j] = -(pv[("d", j, 1)] - 2 * pv["base"]
+                        + pv[("d", j, -1)]) / e ** 2
+    for a in range(n):
+        for b in range(a + 1, n):
+            gamma[a, b] = gamma[b, a] = -(
+                pv[("x", a, 1, b, 1)] - pv[("x", a, 1, b, -1)]
+                - pv[("x", a, -1, b, 1)] + pv[("x", a, -1, b, -1)]) / (4 * e ** 2)
+    return {"pv": -pv["base"], "delta": delta, "gamma": gamma,
+            "pv_combos": pv}
+
+
+def rainbow_book_greeks(sds, asof=None, eps=0.01, n_paths=512, n_slots=256,
+                        seed=1, device=None, mode="sticky_strike",
+                        engine="sobol", quad_nodes=(24, 24), normals=None,
+                        weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI,
+                        notional=NOTIONAL, corr_horizon=5, corr=None,
+                        fac=None):
+    """One-call sold-book spot delta/gamma matrix by central 1%-default
+    bumps (19 pricings + 6 shifted table builds). engine="sobol" prices
+    every combo on one CRN point-set family (n_paths defaults to the
+    512-path book standard); engine="quad" gives zero-variance finite
+    differences (the noise-free cross-check)."""
+    dev = device or default_device()
+    state = prepare_book_greeks(sds, asof, eps, mode, n_slots, dev,
+                                corr_horizon, corr, fac)
+    if engine == "sobol":
+        z = (sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+             if normals is None else normals)
+        pricer = lambda b, sl: price_sobol_batch(
+            b, z, slots=sl, weights=weights, k_lo=k_lo, k_hi=k_hi,
+            notional=notional)
+    else:
+        pricer = lambda b, sl: price_quad_batch(
+            b, *quad_nodes, weights=weights, k_lo=k_lo, k_hi=k_hi,
+            notional=notional)
+    out = book_greeks(state, pricer)
+    out.update(date=state["date"], n_pos=state["n_pos"], mode=mode)
+    return out
 
 
 def rainbow_attribution(sds, n_paths=2048, n_slots=256, seed=1, device=None,
