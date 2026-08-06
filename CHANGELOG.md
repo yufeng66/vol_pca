@@ -52,6 +52,15 @@ and git history.
   ±9% days). Honesty: the caches use 2,048 vs 512 paths — pl diff std
   $759/day, max $7.1k, two orders below the measured effects. Hedge
   comparison + verdict: rainbow_greeks.ipynb section 6 (cells 16–19).
+  Notebook migration (user, same day): the canonical attribution study is
+  now the sticky-strike `rainbow_attribution.ipynb` (16 cells, all SM
+  calculation removed, analysis-only off the cache — 1.8s in-notebook
+  runtime, 4.6s nbconvert wall; incl. the eq-Taylor-quality study:
+  eq_resid totals +$0.03M over 7.6y, std $14k = 2% of pl std, worst $320k
+  on 2020-03-17 — and the theta 3-split and per-pair xgamma cumulative
+  views); the original SM study was renamed
+  `rainbow_attribution_sm.ipynb` with a historical-reference banner
+  (unmaintained; its eq_delta is the smile-delta reporting split).
 
 ## 2026-08-06 — Sticky-strike bump greeks: the cross-gamma matrix is the book's main convexity
 
