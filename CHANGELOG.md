@@ -10,6 +10,49 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-06 — Sticky-strike attribution + the measured hedge verdict: SS delta cuts hedged risk 43%
+
+- The follow-through on the greeks work: re-cut the rainbow book's daily
+  attribution so the delta line IS the sticky-strike hedge, then let the two
+  full-history hedged series settle which framework hedges better. Verdict —
+  **the sticky-strike delta hedge wins decisively**: hedged-P&L std $166.7k
+  → $94.2k (−43%), worst day −$3.12M → −$1.49M, and the mechanism is visible
+  — the SM-hedged series still carries |corr| 0.52 with SPX returns (the SM
+  delta is ~$1.4M more short via the smile-slide vega term, leaving
+  +$1.4M·ret of market beta that *earned* over the rising sample, which is
+  why SM's cumulative looks better: unhedged beta, not hedging skill).
+  Holds in every subsample (2020: $389k→$213k; ex-2020: $94k→$57k; big SPX
+  days: $530k→$274k; better on 62% of days). Adding the 1%-bump gamma +
+  cross-gamma terms explains most of the remainder: std $67.3k, skew −8.4 →
+  −1.0, worst −$0.85M — the crash tail is almost entirely second-order
+  equity risk. The vanilla study's transferred verdict is now a measured one
+  on the exotic book.
+- Record: `rainbow_attribution_ss` in rainbow_torch.py + second pass in
+  `scripts/run_rainbow_attribution.py` (cache
+  `data/rainbow_attribution_ss.csv`; SM cache stays for the comparison).
+  Components: eq = all spots → t sticky-strike (per-index tables re-derived
+  via `strike_shift_dgrid` at the realized ratio u_i = S1/S0, g → g1),
+  attributed by the 1%-bump matrix measured on the same book/CRN points via
+  `book_greeks(per_position=True)` — columns eq_delta(_spx/sx5e/hsi),
+  eq_gamma(_*), eq_xgamma(_pair), eq_resid; vol = day-t grids sampled at
+  m/u_i (fixed strikes, t−1 anchor/curves, τ0 fixed ⇒ roll-free), singles +
+  vol_resid; cross_ev = 4-corner eq×vol on totals — eq and vol compose
+  EXACTLY (both applied = plain day-t tables at g1); theta 3-split per spec:
+  theta_value = (df_time/df0−1)·pv_base (zero revals), theta_delta =
+  Σ per-vintage SS delta × per-vintage forward-ratio decay
+  (fac.forward_ratio(τ1f)/fr(τ0)−1; deltas free from the greek singles' pv
+  vectors), theta_gamma = time − value − delta (rest folded per spec);
+  fwd/rate/resid/premium/mark as the SM driver. ~30 table builds + 30
+  pricings/date at the 512-path standard ≈ 260 ms/date → 1,968 pairs in
+  515 s. Validation: flat-world test (vol/cross/fwd/rate vanish EXACTLY,
+  splits are identities, resid = time×spot cross only); pl/time/fwd/rate
+  match the SM driver < 1e-6 at equal paths/seed and the eq+vol+cross+resid
+  regrouping preserves their sum (tested); COVID-window resid std $13k vs
+  $412 calm (top-level resid absorbs eq_resid-adjacent third-order only on
+  ±9% days). Honesty: the caches use 2,048 vs 512 paths — pl diff std
+  $759/day, max $7.1k, two orders below the measured effects. Hedge
+  comparison + verdict: rainbow_greeks.ipynb section 6 (cells 16–19).
+
 ## 2026-08-06 — Sticky-strike bump greeks: the cross-gamma matrix is the book's main convexity
 
 - How should the rainbow book's hedging greeks be computed — delta vector and
@@ -47,8 +90,13 @@ and git history.
   19 pricings + 6 shifted table builds ≈ 0.1s/book at 512. Tests:
   `test_strike_shift_dgrid_matches_scipy` (1e-13),
   `test_book_greeks_flat_world`, `test_book_greeks_sobol_vs_quad_real`.
-  Notebook: `rainbow_greeks.ipynb` (16 cells, executed). Standing decision
-  recorded same day: 512 Sobol paths is the book-level default.
+  Notebook: `rainbow_greeks.ipynb` (16 cells, executed). Standing decisions
+  recorded same day: 512 Sobol paths is the book-level default, and
+  sticky-strike bumps are the rainbow book's main greeks path (user; the
+  autograd delta — sticky-moneyness by construction, torch-only — is demoted
+  to SM test oracle + the attribution driver's eq_delta reporting split;
+  "SS hedges better" remains a transferred verdict from the SPX study until
+  the daily hedged-P&L comparison is run on this book).
 
 ## 2026-08-06 — Sobol path count for book marks: 256 is enough, 2,048 is 10× inside
 

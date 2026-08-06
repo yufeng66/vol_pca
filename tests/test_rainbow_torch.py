@@ -16,7 +16,8 @@ from vol_pca.rainbow_torch import (MarginalFactory, QuadBatch, QuadProblem,
                                    book_greeks, prepare_book_greeks,
                                    price_quad_batch, price_rainbow_quad_torch,
                                    price_sobol_batch, rainbow_attribution,
-                                   rainbow_book_greeks, sobol_normals)
+                                   rainbow_attribution_ss, rainbow_book_greeks,
+                                   sobol_normals)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV3 = [ROOT / f"{n}_volSurface.csv" for n in ("SPX", "SX5E", "HSI")]
@@ -399,3 +400,47 @@ def test_book_greeks_sobol_vs_quad_real():
     # sold book, symmetric by construction
     assert sb["gamma"][0, 1] == sb["gamma"][1, 0]
     assert sb["gamma"][0, 1] > 0
+
+
+def test_attribution_ss_flat_world():
+    # flat smiles + moving spots: the sticky-strike shift is zero, so the
+    # vol and cross lines vanish EXACTLY; every split is an identity; zero
+    # curves kill fwd/rate; the eq Taylor residual is third-order small
+    paths = {"A": [1.00, 1.01, 0.99, 1.02, 1.005],
+             "B": [1.00, 0.99, 1.01, 0.985, 1.02],
+             "C": [1.00, 1.005, 0.995, 1.01, 0.99]}
+    flat = {}
+    for (n, p), v, s0 in zip(paths.items(), (0.2, 0.25, 0.3), (100.0, 90.0, 80.0)):
+        sd = _flat_sd(n_days=5, vol=v, spot=s0)
+        flat[n] = dataclasses.replace(sd, spot=s0 * np.asarray(p))
+    corr = np.array([[1.0, 0.6, 0.4], [0.6, 1.0, 0.5], [0.4, 0.5, 1.0]])
+    res = rainbow_attribution_ss(flat, n_paths=512, corr=corr, device="cpu",
+                                 t_slice=(2, 5))
+    for c in ["vol", "vol_a", "vol_b", "vol_c", "vol_resid", "cross_ev",
+              "fwd", "rate"]:
+        assert res[c].abs().max() < 1e-6, c
+    tay = res[["eq_delta", "eq_gamma", "eq_xgamma", "eq_resid"]].sum(axis=1)
+    assert np.allclose(tay, res["eq"], atol=1e-9)
+    assert (res["eq_resid"].abs() < 0.05 * res["eq"].abs() + 50.0).all()
+    th = res[["theta_value", "theta_delta", "theta_gamma"]].sum(axis=1)
+    assert np.allclose(th, res["time"], atol=1e-9)
+    top = res[["eq", "vol", "cross_ev", "time", "fwd", "rate", "resid"]].sum(axis=1)
+    assert np.allclose(top, res["pl"], atol=1e-9)
+    assert (res["resid"].abs() < 100.0).all()   # time x spot cross only
+
+
+@pytest.mark.skipif(not all(p.exists() for p in CSV3),
+                    reason="vol surface data not present")
+def test_attribution_ss_matches_sm_driver_where_frameworks_agree():
+    # pl/time/fwd/rate are the identical constructs in both drivers (same
+    # tables, same CRN points at equal n_paths/seed) and the eq/vol/cross
+    # regrouping must preserve their sum
+    sds = {p.name.split("_")[0]: load_surfaces(p) for p in CSV3}
+    kw = dict(n_paths=256, seed=1, t_slice=(30, 32), device="cpu")
+    old = rainbow_attribution(sds, **kw)
+    new = rainbow_attribution_ss(sds, **kw)
+    for c in ["pl", "time", "fwd", "rate", "premium", "mark"]:
+        assert np.abs(new[c] - old[c]).max() < 1e-6, c
+    grp_old = old[["eq", "vol", "cross_sv", "resid"]].sum(axis=1)
+    grp_new = new[["eq", "vol", "cross_ev", "resid"]].sum(axis=1)
+    assert np.abs(grp_new - grp_old).max() < 1e-6

@@ -568,18 +568,21 @@ def prepare_book_greeks(sds, asof=None, eps=0.01, mode="sticky_strike",
             "chol": chol, "fac": fac}
 
 
-def book_greeks(state, pricer):
+def book_greeks(state, pricer, per_position=False):
     """Evaluate a prepared bump set with any batch pricer
     `(batch, slots) -> (B,) pv tensor`. Returns SOLD-book greeks w.r.t.
     RELATIVE spot moves (dS/S; divide by 100 for per-1% numbers):
     delta (n,), gamma (n, n) symmetric Hessian incl. cross terms, pv =
-    sold-book mark, and the raw pv_combos. Under the Sobol engine one
-    point-set family prices all 19 combos (CRN — the differences cancel
-    sampling noise). Gamma MUST come from these bumps: per path the
-    payoff is piecewise linear in g, so a pathwise/autograd second
-    derivative through the sampler is zero almost everywhere."""
-    pv = {k: float(pricer(b, state["slots"]).sum())
-          for k, b in state["batches"].items()}
+    sold-book mark, and the raw pv_combos. per_position=True adds
+    delta_pos (B, n), the per-vintage delta vectors — free, since every
+    pricing already returns the full (B,) pv vector. Under the Sobol
+    engine one point-set family prices all 19 combos (CRN — the
+    differences cancel sampling noise). Gamma MUST come from these
+    bumps: per path the payoff is piecewise linear in g, so a
+    pathwise/autograd second derivative through the sampler is zero
+    almost everywhere."""
+    pvv = {k: pricer(b, state["slots"]) for k, b in state["batches"].items()}
+    pv = {k: float(v.sum()) for k, v in pvv.items()}
     e = state["eps"]
     n = len(state["names"])
     delta = np.zeros(n)
@@ -593,8 +596,12 @@ def book_greeks(state, pricer):
             gamma[a, b] = gamma[b, a] = -(
                 pv[("x", a, 1, b, 1)] - pv[("x", a, 1, b, -1)]
                 - pv[("x", a, -1, b, 1)] + pv[("x", a, -1, b, -1)]) / (4 * e ** 2)
-    return {"pv": -pv["base"], "delta": delta, "gamma": gamma,
-            "pv_combos": pv}
+    out = {"pv": -pv["base"], "delta": delta, "gamma": gamma, "pv_combos": pv}
+    if per_position:
+        out["delta_pos"] = torch.stack(
+            [-(pvv[("d", j, 1)] - pvv[("d", j, -1)]) / (2 * e)
+             for j in range(n)], -1).cpu().numpy()
+    return out
 
 
 def rainbow_book_greeks(sds, asof=None, eps=0.01, n_paths=512, n_slots=256,
@@ -770,6 +777,188 @@ def rainbow_attribution(sds, n_paths=2048, n_slots=256, seed=1, device=None,
         for j, n in enumerate(names):
             row[f"vol_{n.lower()}"] = s(pv_vol1[n] - pv_base)
             row[f"ret_{n.lower()}"] = sp[t, j] / sp[t - 1, j] - 1.0
+        rows.append(row)
+        if progress and t % progress == 0:
+            print(f"  {t}/{len(d64) - 1} {spots.index[t].date()} "
+                  f"n_pos={len(s_idx)}", flush=True)
+    return pd.DataFrame(rows).set_index("date")
+
+
+def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
+                           device=None, weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI,
+                           notional=NOTIONAL, corr_horizon=5, corr=None,
+                           t_slice=None, progress=None):
+    """The sticky-strike re-cut of rainbow_attribution (user spec
+    2026-08-06) — the attribution whose delta line is the sticky-strike
+    hedge, so the delta-hedged series settles which framework hedges
+    better. Same book, engine, CRN discipline and settle conventions as
+    the sticky-moneyness driver; the pl/time/fwd/rate lines are the
+    identical constructs (they match the old driver to fp at equal
+    n_paths/seed) — only the equity/vol cut moves.
+
+    Components (all independent single-input revals off the t-1 close,
+    sold-book sign, fixed lookup tau so term roll stays out of eq/vol):
+
+    - eq: ALL spots -> t the sticky-strike way — each index's tables are
+      re-derived from its moneyness-shifted smile (strike_shift_dgrid at
+      the realized ratio u_i = S1/S0: vols pinned per strike, a different
+      implied distribution) AND g -> g1. Attributed by the 1%-bump greeks
+      matrix measured on the same book/points (book_greeks): per-index
+      delta and gamma terms, per-pair cross-gamma terms, eq_resid.
+    - vol: ALL surfaces -> t at fixed strikes (day-t grids sampled at
+      m/u_i, t-1 anchor and curves), g0; per-index singles + vol_resid
+      (joint-move interaction). eq and vol compose exactly: applying both
+      = plain day-t tables at g1, which is what cross_ev's 4-corner uses.
+    - cross_ev: P(eq+vol) - P(eq) - P(vol) + P(base), the total
+      equity x vol cross by bumped revaluations.
+    - time, split in three: theta_value = discount-factor decay on the
+      base pv (zero revaluations); theta_delta = per-vintage sticky-strike
+      deltas x each vintage's forward-ratio decay over dt (the carry of
+      the delta position, from the greek singles' pv vectors);
+      theta_gamma = the rest (gamma theta + vol carry + drift
+      nonlinearity, folded per spec).
+    - fwd, rate, resid, premium, mark: as in the sticky-moneyness driver.
+
+    Cost: ~30 table builds + 30 pricings/date at the 512-path standard.
+    """
+    dev = device or default_device()
+    spots = spot_panel(sds)
+    names = list(sds)
+    d64 = spots.index.values.astype("datetime64[D]")
+    di = {n: np.searchsorted(sds[n].dates, d64) for n in names}
+    if corr is None:
+        corr = historical_corr(spots, corr_horizon).to_numpy()
+    chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
+                           dtype=torch.float64, device=dev)
+    fac = MarginalFactory(sds, device=dev)
+    zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+    sp = spots.to_numpy()
+    expiry = d64 + np.timedelta64(365, "D")
+    t64 = lambda a: torch.as_tensor(a, dtype=torch.float64, device=dev)
+    P = lambda b, sl: price_sobol_batch(b, zsets, slots=sl, weights=weights,
+                                        k_lo=k_lo, k_hi=k_hi, notional=notional)
+    lo = [n.lower() for n in names]
+    rows = []
+    t_lo, t_hi = t_slice if t_slice is not None else (1, len(d64))
+    for t in range(max(t_lo, 1), min(t_hi, len(d64))):
+        s_idx = np.nonzero(expiry[:t] > d64[t - 1])[0]
+        tau0 = (expiry[s_idx] - d64[t - 1]).astype(float) / 365.0
+        tau1 = (expiry[s_idx] - d64[t]).astype(float) / 365.0
+        tau1f = np.maximum(tau1, 1e-6)
+        settle = torch.as_tensor(tau1 <= 0, device=dev)
+        g0, g1 = t64(sp[t - 1] / sp[s_idx]), t64(sp[t] / sp[s_idx])
+        slots = torch.as_tensor(s_idx % n_slots, device=dev)
+        u = sp[t] / sp[t - 1]                        # realized spot ratios
+        ret = u - 1.0
+
+        T = {}
+        for j, n in enumerate(names):
+            i0, i1 = di[n][t - 1], di[n][t]
+            sh = lambda ii, e: fac.strike_shift_dgrid(n, ii, e)
+            T[j] = {"base": fac.tables(n, i0, tau0),
+                    1: fac.tables(n, i0, tau0, dgrid=sh(i0, eps)),
+                    -1: fac.tables(n, i0, tau0, dgrid=sh(i0, -eps)),
+                    "equ": fac.tables(n, i0, tau0, dgrid=sh(i0, u[j] - 1.0)),
+                    "vol": fac.tables(n, i1, tau0, di_curve=i0,
+                                      dgrid=sh(i1, 1.0 / u[j] - 1.0)),
+                    "ev": fac.tables(n, i1, tau0, di_curve=i0),
+                    "time": fac.tables(n, i0, tau1f),
+                    "fwd": fac.tables(n, i0, tau0, di_curve=i1),
+                    "full": fac.tables(n, i1, tau1f)}
+        usd, iu0, iu1 = names[0], di[names[0]][t - 1], di[names[0]][t]
+        df0 = fac.discount(usd, iu0, tau0)
+        df_rate = fac.discount(usd, iu1, tau0)
+        df_time = fac.discount(usd, iu0, tau1f)
+        df_full = fac.discount(usd, iu1, tau1f)
+
+        def mk(keys, g, df):
+            return fac.batch([T[j][k] for j, k in enumerate(keys)], g, df, chol)
+
+        def mkb(shifts):                 # greek combos off the base tables
+            g = g0.clone()
+            for j, sgn in shifts.items():
+                g[:, j] = g[:, j] * (1.0 + sgn * eps)
+            return mk([shifts.get(j, "base") for j in range(3)], g, df0)
+
+        gbat = {"base": mkb({})}
+        for j in range(3):
+            for sgn in (1, -1):
+                gbat[("d", j, sgn)] = mkb({j: sgn})
+        for a in range(3):
+            for b in range(a + 1, 3):
+                for sa in (1, -1):
+                    for sb in (1, -1):
+                        gbat[("x", a, sa, b, sb)] = mkb({a: sa, b: sb})
+        gk = book_greeks({"batches": gbat, "slots": slots, "names": names,
+                          "eps": eps}, P, per_position=True)
+
+        base3 = ["base"] * 3
+        pv_base = P(mk(base3, g0, df0), slots)
+        pv_eq = P(mk(["equ"] * 3, g1, df0), slots)
+        pv_vol1 = [P(mk(["vol" if m == j else "base" for m in range(3)],
+                        g0, df0), slots) for j in range(3)]
+        pv_vol = P(mk(["vol"] * 3, g0, df0), slots)
+        pv_ev = P(mk(["ev"] * 3, g1, df0), slots)
+        pv_time = torch.where(settle, _intrinsic(g0, weights, k_lo, k_hi,
+                                                 notional),
+                              P(mk(["time"] * 3, g0, df_time), slots))
+        pv_fwd = P(mk(["fwd"] * 3, g0, df0), slots)
+        pv_full = torch.where(settle, _intrinsic(g1, weights, k_lo, k_hi,
+                                                 notional),
+                              P(mk(["full"] * 3, g1, df_full), slots))
+
+        prem_tb = [fac.tables(n, di[n][t], np.array([1.0])) for n in names]
+        prem = P(fac.batch(prem_tb, t64([[1.0, 1.0, 1.0]]),
+                           fac.discount(usd, iu1, np.array([1.0])), chol),
+                 torch.as_tensor([t % n_slots], device=dev))
+
+        s = lambda v: -float(v.sum())               # sold book
+        eq = s(pv_eq - pv_base)
+        vol = s(pv_vol - pv_base)
+        vol1 = [s(v - pv_base) for v in pv_vol1]
+        cross_ev = s(pv_ev - pv_eq - pv_vol + pv_base)
+        time = s(pv_time - pv_base)
+        fwd = s(pv_fwd - pv_base)
+        rate = s((df_rate / df0 - 1.0) * pv_base)
+        pl = s(pv_full - pv_base)
+
+        # eq Taylor pieces from the sold-signed 1%-bump matrix
+        d_terms = gk["delta"] * ret
+        g_terms = 0.5 * np.diag(gk["gamma"]) * ret ** 2
+        pairs = [(0, 1), (0, 2), (1, 2)]
+        x_terms = [gk["gamma"][a, b] * ret[a] * ret[b] for a, b in pairs]
+        # theta pieces: discounting on the base pv, then the per-vintage
+        # sticky-strike deltas carried by each vintage's forward decay
+        theta_value = s((df_time / df0 - 1.0) * pv_base)
+        drift = np.stack(
+            [(fac.forward_ratio(n, di[n][t - 1], tau1f)
+              / fac.forward_ratio(n, di[n][t - 1], tau0) - 1.0).cpu().numpy()
+             for n in names], -1)
+        theta_delta = float((gk["delta_pos"] * drift).sum())
+
+        row = {"date": spots.index[t], "n_pos": len(s_idx),
+               "n_settle": int(settle.sum()), "pl": pl,
+               "eq": eq, "eq_delta": float(d_terms.sum()),
+               **{f"eq_delta_{n}": float(d_terms[j]) for j, n in enumerate(lo)},
+               "eq_gamma": float(g_terms.sum()),
+               **{f"eq_gamma_{n}": float(g_terms[j]) for j, n in enumerate(lo)},
+               "eq_xgamma": float(np.sum(x_terms)),
+               **{f"eq_xgamma_{lo[a]}_{lo[b]}": float(x)
+                  for (a, b), x in zip(pairs, x_terms)},
+               "eq_resid": eq - float(d_terms.sum() + g_terms.sum()
+                                      + np.sum(x_terms)),
+               "vol": vol,
+               **{f"vol_{n}": vol1[j] for j, n in enumerate(lo)},
+               "vol_resid": vol - sum(vol1),
+               "cross_ev": cross_ev, "time": time,
+               "theta_value": theta_value, "theta_delta": theta_delta,
+               "theta_gamma": time - theta_value - theta_delta,
+               "fwd": fwd, "rate": rate,
+               "resid": pl - eq - vol - cross_ev - time - fwd - rate,
+               "premium": float(prem[0]),
+               "mark": -float(pv_full[~settle].sum()),
+               "dt": float((d64[t] - d64[t - 1]).astype(float)) / 365.0,
+               **{f"ret_{n}": ret[j] for j, n in enumerate(lo)}}
         rows.append(row)
         if progress and t % progress == 0:
             print(f"  {t}/{len(d64) - 1} {spots.index[t].date()} "
