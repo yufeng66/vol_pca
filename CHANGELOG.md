@@ -70,7 +70,14 @@ and git history.
   the desk keeps only theta_gamma (+$0.48M). Same convention as the vanilla
   thread's `hedged = pl − eq_delta − time_funding`. The SS-vs-SM 43% verdict
   (greeks nb §6) is carry-insensitive — both series there are
-  carry-inclusive by identical construction.
+  carry-inclusive by identical construction. Same change mirrored in the
+  vanilla `attribution.ipynb` (its headline was already the desk view —
+  that's where the convention came from; chart upgraded to the decomposed
+  form + daily histogram, md gets the treasury/delta-one mapping; vanilla
+  `time_funding` nets to −$0.01M over 12.4y so the headline barely moves,
+  verified off the long-history cache). Its hedged cell is committed
+  **unexecuted**: the notebook loads `SPX_volSurface 2.csv`, deleted by
+  mistake — re-execute after the user restores it.
 
 ## 2026-08-06 — Sticky-strike bump greeks: the cross-gamma matrix is the book's main convexity
 
