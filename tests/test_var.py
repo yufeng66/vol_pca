@@ -15,7 +15,7 @@ from vol_pca.var import (book_price_fn, book_speed, build_book,
                          rolling_var_bump, scenario_dsigma,
                          strike_histogram_weights)
 
-CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface 2.csv"
+CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface.csv"
 
 
 def test_static_world_scenarios_are_zero_pnl():

@@ -10,7 +10,7 @@ from vol_pca.data import SurfaceData, load_surfaces
 from vol_pca.factors import sticky_strike_dsigma
 from vol_pca.surface import MONEYNESS, TTM_PILLARS
 
-CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface 2.csv"
+CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface.csv"
 
 
 @pytest.mark.parametrize("interp", ["linear", "cubic", "pchip"])

@@ -21,7 +21,7 @@ from vol_pca.var import (rolling_var_adaptive, rolling_var_backtest,
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 t0 = time.time()
-sd = load_surfaces(ROOT / "SPX_volSurface 2.csv")
+sd = load_surfaces(ROOT / "SPX_volSurface.csv")
 _, bucket_vega_hist, _ = simulate_book(sd)
 normal = np.diff(sd.dates).astype(int) <= 7
 vega_w = np.abs(bucket_vega_hist[normal]).mean(axis=0)

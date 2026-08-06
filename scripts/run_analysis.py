@@ -21,7 +21,7 @@ MAX_GAP_DAYS = 7   # exclude month-long data-gap "days" from PCA fit and stats
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", default="SPX_volSurface 2.csv")
+    ap.add_argument("--csv", default="SPX_volSurface.csv")
     ap.add_argument("--out", default="data")
     args = ap.parse_args()
 

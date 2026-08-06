@@ -8,7 +8,7 @@ from vol_pca.attribution import independent_attribution
 from vol_pca.book import simulate_book
 from vol_pca.data import SurfaceData, load_surfaces
 
-CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface 2.csv"
+CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface.csv"
 
 
 def test_static_world_only_time():

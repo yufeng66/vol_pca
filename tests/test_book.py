@@ -8,7 +8,7 @@ from vol_pca.data import SurfaceData, load_surfaces
 from vol_pca.factors import factor_vega_estimates, fit_pca
 from vol_pca.surface import MONEYNESS, TTM_PILLARS
 
-CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface 2.csv"
+CSV = pathlib.Path(__file__).resolve().parents[1] / "SPX_volSurface.csv"
 
 
 def _flat_sd(n_days=4, vol=0.20, spot=100.0, bump_day=None, bump=0.01):
