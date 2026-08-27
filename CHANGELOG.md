@@ -10,6 +10,54 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-27 — PDE-vs-MC demonstration: full-path Monte Carlo converges to the RILA PDE reference on every date and every seasoning state
+
+- Follow-up to the RILA build (user, same day): the PDE-is-the-value-of-record
+  claim "could make the whole thing a lot faster and the GPU Sobol stuff
+  unnecessary" — so demonstrate, don't assert, that plain full-path Monte
+  Carlo converges to `pde_reset_price` on the five regime dates, for newly
+  issued AND seasoned states. The demonstration is a **joint limit** shown on
+  two separate axes: convergence funnels in N at fixed daily stepping (20
+  panels: GPU pseudo full-path to 2^21 with scramble/seed replicates, the
+  canonical CPU numpy engine inside the same funnel, Sobol+bridge approaching
+  the same limit faster), and step-bias ladders at fixed N=2^17 (Sobol+bridge
+  so noise ≪ bias). Conclusion: **MC ≡ PDE everywhere once the measured
+  first-order Euler bias is accounted for.** Calm-regime funnels close onto
+  the PDE line within ±2se (2026-07-31 newly issued: gap +0.0011 ± 0.0141 per
+  100 at 2^21); the COVID surface converges *confidently to the scheme's
+  biased value* — funnel gap +0.347 ± 0.014 vs independently measured daily-step
+  bias +0.341 ± 0.011, pseudo and Sobol agreeing on the biased value to 3e-4 —
+  and the bias halves per step doubling (0.341→0.167, ratio 2.04; per-state
+  0.16–0.34 per 100 at daily steps on 2020-03-16). Richardson-extrapolating
+  the two finest rungs lands back on the PDE within ±2se on 8/9 configs
+  (worst intercept 0.027 on COVID mid-window). The PDE reference's own error:
+  refining every axis at once (n_K 145→217, n_x 1201→1601, steps/yr 320→480)
+  moves no state by more than 0.0036 per 100. Post-window seasoned states add
+  the market-side anchor: PDE ≡ MC internally, both a calibration-repricing
+  error from the direct surface read. Verdict stands: the PDE (~3s/state,
+  no regime-sensitive step knob) is the production engine for this product;
+  MC's role is independent verification and the template for products that
+  don't compress into a small carried state.
+- Record: driver `scripts/run_rila_pde_mc.py` (skip-if-cached, ~50 min cold on
+  a shared GPU; stages refs/funnel/bias) → `data/rila_pdemc_ref.csv` (20
+  states: PDE @ production config + refined-grid resolve + surface reads),
+  `rila_pdemc_funnel.csv` (270 rows: gpu_pseudo N=2^12..2^21 all 20 states,
+  reps 16/12/8 by N; cpu_plain anchors 2^14/2^16 ×3 seeds; gpu_sobol_bb
+  2^12..2^17 on newly-issued), `rila_pdemc_bias.csv` (44 rows: py ∈
+  {12,52,126,252,504} at N=2^17×8, newly-issued all dates + mid_r2 STUDY +
+  COVID/current mid_r4 top-ups), `rila_pdemc_arb.csv` (fresh-seed arbitration
+  of the one >2×2se residual: 2026-07-31 mid_r4 re-measures at +0.013 ± 0.021
+  pseudo 2^19×32 / +0.003 ± 0.002 Sobol 2^17×16 — a tail draw among twenty
+  seed-correlated ladders, not a disagreement; kept in the notebook as the
+  honesty footnote). Notebook `rila_pde_vs_mc.ipynb` (13 cells, ~8s off
+  cache). States: new (r=6), mid r=4 K/S=0.95, mid r=2 K/S=1.08, post-window
+  3y K/S=0.90. Pitfalls: funnel replicate ladders share seeds across N rungs
+  (rungs correlated — error bars per rung remain valid, but the worst-of-20
+  top-rung draw can sit ~2×2se from truth, hence the arbitration file);
+  seasoned mid-window bias must be measured per state (COVID r=4 bias +0.313
+  explains its +0.299 funnel gap — without that row the verdict table shows
+  an unexplained 13σ).
+
 ## 2026-08-27 — RILA reset package under Dupire local vol: what a 6y path-dependent insurance hedge costs, and how fast Monte Carlo gets there
 
 - A new, **valuation-only** thread (user spec; explicitly no greeks, no VaR,
