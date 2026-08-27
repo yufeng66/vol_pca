@@ -10,6 +10,58 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-10 — Does the 100/112 cap shelter the rainbow price from copula/tail misspecification? Yes at-the-money; the shelter is regime-dependent, and an uncapped call would promote the dependence model to a first-order input
+
+- Methodology discussion (user: pricing a call *spread* sidesteps tail-scenario
+  correlation issues a plain call would force us to study — agree?). Measured
+  answer on two regimes, same implied marginals and CRN scrambled-Sobol
+  uniforms (2^17 paths, 2 seeds, seed-diff ≤$11), dependence swapped:
+  Gaussian base vs Student-t ν=8/4 at the **same** correlation (pure
+  tail-dependence stress, same Kendall τ) vs ±10pt average-corr blends.
+  Fresh 1Y ATM unit (2026-07-31): the spread is essentially copula-flat
+  (+0.3%/−0.1% per ±10 corr pts — the 100 and 112 kinks' dispersion vegas
+  cancel; t4 −0.5%), while the uncapped 100 call moves ±2% per 10 corr pts
+  and −1.5% under t4, all of it through the beyond-cap tail E[(B−1.12)+]
+  (29% of the call's value, ±7% per 10 pts). But the shelter is
+  **regime-dependent, not structural**: the displaced COVID vintage (sold
+  2019-09-16, marked 2020-03-16, g≈0.75, τ≈0.5 — the band needs a joint
+  ~+30% half-year rally) swings ±10% per 10 corr pts and −5.7% under t4
+  at unchanged correlation, even as a spread — dollar-bounded by the cap
+  ($6.2k value), but the copula's *shape* prices those vintages. Conclusion:
+  agree — the cap localizes the price to the band CDF (layer-cake
+  ∫P(B>k)dk over [1.00,1.12]) and bounds worst-case dependence error at
+  12%·N·ΔP, and the near-corr-neutrality is a measured kink cancellation,
+  not a free lunch; an uncapped call keeps the whole joint upper tail —
+  copula family + corr level + marginal wing taper all become first-order,
+  needing a model-risk band (t/asymmetric families), tail-dependence
+  estimation on thin joint history, wing-taper sensitivity, path-count
+  revalidation for the unbounded payoff, and Δcorr as a VaR bump/scenario
+  dimension.
+- Record: scratchpad-only study (recipe: `ImpliedMarginal.quantile` +
+  hand copulas over one shared Sobol U(d=4) — z=Φ⁻¹(U₁..₃)·Lᵀ, t via
+  χ²-mix of U₄, blends toward all-ones/identity for PSD ±10pt shifts;
+  hand-Gaussian vs `price_rainbow` parity $3). Numbers, fresh ATM
+  (spread $53.0k, call $75.1k = spread + $22.1k tail, P(B>hi)=0.28):
+  t8/t4 spread −0.3/−0.5%, call −0.7/−1.5%, tail −1.8/−3.8%; ρ±10
+  spread +0.3/−0.1%, call +2.2/−2.0%, tail +6.7/−6.6%. Displaced COVID
+  vintage (spread $6.2k, call $7.9k, P(B>lo)=0.11): t8/t4 spread
+  −3.0/−5.7% with tail +9.0/+14.8% (t moves dependence mass center→tails:
+  near-band prices *fall* while the genuinely-far tail fattens — "tail
+  dependence raises calls" is only true tail-by-tail); ρ±10 spread
+  +9.2/−10.0%, call +12.0/−12.5% — displaced books are correlation-LONG
+  (recovery needs co-movement) where the ATM book is corr-flat. Ranked
+  weights keep a copula exposure even in-band: B = 0.4·(p₁+p₂) +
+  0.1·|p₁−p₂| + 0.2·p₃, so the basket *forward* itself is
+  copula-dependent (E|p₁−p₂|=0.107 ⇒ ~1.1 pts of E[B]=1.029) — unlike a
+  fixed-weight basket. Risk-side twin for a call book: the historical
+  scenario set already carries realized co-crash tails (joint sampling),
+  but both VaR engines reprice at the frozen constant Σ̂ — a correlation
+  seam like the excluded curve seam; second-order for the corr-flat
+  spread book, a missing risk factor (bump greek + scenario dimension)
+  for a call book. No implied-corr instruments exist in this dataset, so
+  a call book's dependence exposure is reserve/limit territory, not
+  hedgeable.
+
 ## 2026-08-06 — Rainbow cheap-VaR benchmark across five gamma regimes: the projection owns the bulk, a ~10% dual-screened partial reval makes VaR99 exact
 
 - The rainbow thread's first VaR study (user: "pick one day with negative
