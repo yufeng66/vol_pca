@@ -10,6 +10,172 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-08-27 — RILA reset package under Dupire local vol: what a 6y path-dependent insurance hedge costs, and how fast Monte Carlo gets there
+
+- A new, **valuation-only** thread (user spec; explicitly no greeks, no VaR,
+  no book simulation). The product is the insurer's hedge asset behind a
+  registered index-linked annuity on SPX: 6y, terminal
+  `(0.8K−S_T)+ − (S_T−K)+ + (S_T−2K)+` on a basis that **ratchets**
+  `K ← max(K, S_{t_i})` at six monthly fixings, so the final basis is
+  `max(S₀, S_{1/12..1/2})` and all three strikes move with it. Question:
+  price it under Dupire local vol calibrated to the same five-date regime
+  panel the rainbow thread uses, and measure how fast plain Monte Carlo
+  converges versus advanced GPU methods. Four findings. **(1) The pillar
+  grid cannot reach the product** — the repo's 8 TTM pillars stop at 1.0y,
+  so the calibration input was rebuilt from the cleaned raw rows (~17 terms
+  to ~9.4y) with total variance interpolated at fixed log-forward-moneyness
+  (PCHIP in τ through exact per-term knots + the w(0,y)=0 anchor; a cubic
+  overshoots between the anchor and the first ~1M term and invents calendar
+  arb). **(2) The flat wing clamp is not a neutral baseline.** It kinks
+  σ(y) at the 50/150 join; Dupire reads the kink as local butterfly
+  arbitrage (denominator < 0 at 90–255 nodes per date, at maturities out to
+  6y), the guard floors σ_loc in a band where the long-dated put wing still
+  has vega, and the LV surface then fails to reprice its own input by ~0.31–0.42
+  vol pts for τ≥0.5 (individual 5.4y/70-moneyness errors ≈ −2 pts), leaving
+  the frozen-basis package 0.25–0.59 per 100 away from the direct surface
+  read. The C1 edge-slope taper `rainbow.py` already uses fixes it
+  (0.06–0.14 vol pts, package gap 0.0002–0.025) and is now the module
+  default; the clamp is still calibrated and priced on every date as the
+  spec's baseline/sensitivity. Wing sensitivity on the newly-issued package
+  (2026-07-31): taper − clamp = **−0.978 per 100 of basis** (−$9,777 per
+  $1M), of which the 2K call leg alone is −1.379 (2.620 vs 3.999; implied
+  vol at the 200 strike 15.35% vs 17.51%). **(3) The ratchet is coupled on
+  only six dates**, which buys two things: a deterministic PDE reference —
+  n_K independent 1-D Crank–Nicolson solves sharing one tridiagonal
+  operator, relabelled `V(t⁻,S,K)=V(t⁺,S,max(K,S))` at each fixing, ~3
+  s/state — and a flagship MC engine that simulates only the six-month
+  window (126 dims) and integrates the 5.5y tail *exactly* against a
+  precomputed T(S_w,K) table. **(4) Sampling error stops being the problem
+  long before the bias does.** The hybrid clears 1bp of spot sampling error
+  at 4,096 paths in 0.035 s (vs 314 CPU s for plain MC, ~8,900×), but at
+  daily window steps the log-Euler bias is still 0.009 per 100 on
+  2026-07-31 and **0.332 on 2020-03-16**, where σ_loc reaches 324% — ~50×
+  the sampling error at N=2^18, and first-order in Δt (halving the step
+  halves it, measured over 21→1008 steps/yr on both dates). On crisis
+  surfaces the budget belongs to steps, not paths — or to the PDE, which
+  for this product is both exact and cheap.
+- Record — **values** (per 100 of basis, signed, taper wings, PDE
+  reference; newly issued K=S, 6y): 2020-03-16 **+9.127**, 2021-09-20
+  −2.261, 2022-03-16 −6.859, 2024-10-08 −15.775, 2026-07-31 **−19.111**;
+  frozen-basis European −3.230 / −7.582 / −12.619 / −20.349 / −23.056, so
+  the **reset premium** is +12.358 / +5.321 / +5.760 / +4.574 / +3.945 —
+  always positive (the ratchet can only shorten the short call and lengthen
+  the put) and monotone in the vol regime. $1M-notional illustration on
+  2026-07-31: value −$191,105, of which the ratchet is worth +$39,450. The
+  sign flip is the put: on the COVID date a 6y 80%-strike put on a crashed
+  spot is worth 15.74 points against 20.39 collected on the short 100 call,
+  and the ratchet in that vol is worth 12.36. Seasoned mid-window (r=4/2 ×
+  K/S 0.95/1.00/1.08) and post-window (r=0, ttm 5.5/3/1 × K/S
+  0.75/0.90/1.00/1.10) grids in `data/rila_states.csv`; **post-window
+  states are returned by direct surface reads, never simulated** (identity,
+  tested), and the LV-PDE vs direct-read gap over all 60 of them (mean
+  0.059, max 0.533 per 100 on the COVID date) is the calibration error
+  measured end to end on the product itself.
+- Record — **calibration**: `dupire_local_vol` on 120 geomspace(1/365,
+  6.05) × 141 y∈[−3,3] = 16,920 nodes, floor 0.05², cap 4·σ_ATM(τ). Taper
+  wings, τ≥0.5 vol-pt repricing error mean/max: 2020-03-16 0.859/4.19,
+  2021-09-20 0.067/0.284, 2022-03-16 0.059/0.293, 2024-10-08 0.141/0.687,
+  2026-07-31 0.095/0.618. Floor fires on 2.5–11.2% of nodes, cap on
+  0.6–45.2% — the cap almost entirely at τ<0.2y, where Dupire is genuinely
+  ill-conditioned (a 3-week smile running 85% vol at 50-moneyness to 12%
+  ATM makes the denominator a small residual of large cancelling terms);
+  the product's monthly fixings give that region ~no weight. 2020-03-16
+  carries real arbitrage (1,691 calendar-arb + 130 butterfly-arb nodes) the
+  floor absorbs — same crash-surface pathology the rainbow thread logged
+  from the density side. **Refining the grid does not help**: n_y 141→601
+  moves the τ≥0.5 mean by <0.05 vol pts, so the residual is data, not
+  discretisation (141 kept, per spec).
+- Record — **convergence** (all "per 100 of basis"; 1bp of spot = 0.01).
+  CPU plain pseudo log-Euler is textbook N^(−1/2) with no surprises (the
+  payoff is continuous and the fixings are exact grid nodes). 2026-07-31,
+  daily (1512) steps: s.e. 0.143 at N=2^16 in 1.29 s ⇒ **10bp in 3.1 s,
+  1bp in 314 s (13.4M paths)**; weekly (310 steps) same variance at
+  one-fifth the cost (1bp in 60 s) but 5× the bias; monthly 14 s. COVID is
+  ~11% noisier (1bp in 395 s). The **frozen-basis control variate** on the
+  exact LV-PDE mean: corr 0.990, s.e. 0.143→0.020 (~50× variance), 1bp in
+  6.4 CPU s — a pseudo-MC device only, and explicitly *not* a contradiction
+  of the 2026-08-06 negative CV verdict, which was about scrambled Sobol
+  (there the QMC rule has already integrated the smooth component the
+  control shares, so the correction only adds the control's own noise; on
+  COVID the CV is weaker, 3.2×, 1bp in 40 s). GPU rungs, RMSE across 16–24
+  independent scrambles, 2026-07-31, RMSE @ N=2^16 / s / measured s to 1bp:
+  device pseudo 0.126 / 0.269 / 21.6* ; Sobol full path no bridge 0.031 /
+  1.005 / 4.6* ; **Sobol + Brownian bridge full path 0.0129 / 1.095 /
+  2.12** ; hybrid pseudo 0.0350 / 0.021 / 0.051 ; **hybrid Sobol+bridge
+  0.00126 / 0.097 / 0.035** (* = extrapolated along the fitted rate).
+  Fitted RMSE ~ N^a: pseudo −0.544, Sobol −0.572, Sobol+BB −0.464, hybrid
+  pseudo −0.564, **hybrid Sobol+BB −0.639** (COVID: −0.530 / −0.553 /
+  −0.527 / −0.571 / −0.602). **The lesson on the rate**: on the raw
+  1512-dimensional path scrambled Sobol buys a *constant*, not an exponent
+  (4× at N=2^12, 13× with the bridge, but every fitted a stays near −0.5);
+  only collapsing the dimension to 126 *and* smoothing the payoff moves the
+  exponent. At N=2^16 the hybrid Sobol+BB is 100× more accurate than device
+  pseudo **and 2.8× faster**; it is 28× more accurate than the pseudo
+  hybrid at 4.6× the cost. Speedups vs plain CPU MC at 1bp: 15× (device
+  pseudo), 69× (Sobol), 148× (Sobol+BB), 6,200× (hybrid pseudo), 8,900×
+  (hybrid Sobol+BB) — the last two sit on a ~0.02–0.04 s kernel-launch
+  floor, so they are launch-bound, not throughput-bound.
+- Record — **bias ladder** (value − PDE reference, per 100): 2026-07-31
+  hybrid window 21/63/126/252/504/1008 steps-per-year → 0.0140 / 0.0177 /
+  0.0131 / 0.0092 / 0.0070 / 0.0054; 2020-03-16 → 1.775 / 1.011 / 0.599 /
+  0.330 / 0.182 / 0.092 (clean first-order: each doubling ≈ halves it). The
+  full-path engine at the same steps/yr agrees with the hybrid on the bias
+  (2026 0.0098 vs 0.0092 at 252/yr, COVID 0.353 vs 0.332) — hybrid vs
+  full-path parity holds to 0.7σ, so the hybrid is the same estimator, only
+  cheaper. Extrapolating COVID, 1bp of bias needs ~9,300 steps/yr; the
+  3-second PDE is the better answer there.
+- Record — **modules**. `vol_pca/local_vol.py` (numpy only, tested to
+  import in a torch-free env): `load_term_surfaces`/`TermSurface` (built on
+  the new `data.load_clean_frame`, a behaviour-preserving extraction from
+  `load_surfaces`), `dupire_local_vol` → `LocalVolSurface`,
+  `european_package_surface`, `cn_rollback`, `pde_vanilla_calls`,
+  `pde_reprice_table`, `pde_package`, `pde_tail_table`, `pde_reset_price`,
+  `mc_time_grid`, `simulate_terminal`, `price_rila_mc`, `rila_value`,
+  `flat_reset_oracle`, `RilaState`/`rila_state`/`per_100`.
+  `vol_pca/rila_torch.py` (the **second** `*_torch.py`; CLAUDE.md's "single
+  torch module" rule generalised to "torch only inside `*_torch.py`"):
+  `DeviceLV`, `bb_plan`/`bb_increments`, `TailTable`/`make_tail_table`,
+  `rila_price_torch`, `prepare`, `rila_replicates`. Driver
+  `scripts/run_rila.py` (24.8 min cold, five skip-if-cached stages →
+  `data/rila_lv_<date>_<wing>.npz`, `rila_calib.csv`, `rila_reprice.csv`,
+  `rila_wing.csv`, `rila_states.csv`, `rila_conv_cpu.csv`,
+  `rila_conv_gpu.csv`, `rila_bias.csv`). Notebook `rila_pricing.ipynb`
+  (analysis off cache + one live validation cell, 12.5 s). Tests:
+  `tests/test_local_vol.py` (19) + `tests/test_rila_torch.py` (11,
+  importorskip); suite 125 passed.
+- Record — **pitfalls hit, in the order they bit**. (a) *The PDE's top
+  Dirichlet boundary.* The frozen-basis asymptote V → −K·D is **wrong**
+  once a fixing can still fire (there V → −S_ratchet·D); hard-coding it put
+  the reset reference ~1bp of spot off the flat-vol oracle. The fix is the
+  **linearity condition** (V affine in S at both ends, imposed through the
+  three outermost nodes so the system stays tridiagonal) — exact for a
+  call, for the frozen package and for the ratcheting package alike, and no
+  case analysis. (b) *The ratchet gather.* Interpolating V(t⁺,S,·) at
+  K'=max(K,S) must be **linear in K with top extrapolation**, not clamped:
+  clamping values a 10σ node at −k_max instead of ≈−S. The local end slope
+  happens to be right in both regimes (−D with the basis frozen, ≈0 while a
+  later fixing can still overwrite it). (c) *Rannacher on every leg.* The
+  relabel leaves a delta kink at S=K, so each post-fixing roll needs its own
+  fully-implicit start, not just the terminal payoff. (d) *The flat-vol
+  oracle's quadrature.* Plain Gauss–Hermite over the un-split
+  max(1,xg)·v(min(xg,1)) integrand was still drifting ~1bp at 128 nodes
+  (kinked *and* unbounded); splitting at xg=1 — Gauss–Legendre in
+  copula-uniform space below, closed-form lognormal partial expectation
+  above — converges to 1e-6 in 0.4 s, and the PDE reference then lands on
+  it to 5e-5 per 100. Oracle x-grid floor is 0.03, not the spec's 0.3:
+  compounding down-months at the outer nodes reach ~0.05. (e) *Sobol
+  generation.* `rainbow_torch.sobol_normals` (one small resident d=3 point
+  set per book slot) does not transfer: here d=84–1512 × N neither fits
+  "generate once, keep resident" nor survives the host round-trip, so the
+  rungs use `torch.quasirandom.SobolEngine` drawn straight into a device
+  buffer (one seed = one scramble). Generating N×1512 points is ~half the
+  full-path rung's wall clock — which is exactly why the error-vs-seconds
+  panel, not error-vs-N, is the honest chart. (f) *fp32.* Safe only because
+  the path state is carried as q = ln(S/S₀) and the basis as K/S₀ (both
+  O(1)); carrying ln S itself (≈8.9 for SPX) would accumulate ~4bp of
+  relative error over 1512 steps. CRN parity CPU↔GPU: 8e-16 relative in
+  fp64, 2.7e-7 in fp32.
+
 ## 2026-08-10 — Does the 100/112 cap shelter the rainbow price from copula/tail misspecification? Yes at-the-money; the shelter is regime-dependent, and an uncapped call would promote the dependence model to a first-order input
 
 - Methodology discussion (user: pricing a call *spread* sidesteps tail-scenario

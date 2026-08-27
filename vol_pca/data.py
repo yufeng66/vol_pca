@@ -46,7 +46,13 @@ def _repair_upper_wing(vols):
     return int(repaired.sum())
 
 
-def load_surfaces(csv_path):
+def load_clean_frame(csv_path):
+    """Cleaned raw rows: EOD only, duplicate (date, term) dropped, expired
+    terms removed, far-call wing repaired, `asof`/`term`/`ttm` columns added
+    and vols still in percent. This is the full ~17-term-per-date structure;
+    `load_surfaces` collapses it onto the fixed TTM pillars, while consumers
+    that need the long end (local-vol calibration out to 6y) read it raw.
+    Returns (frame, n_dupes_dropped, n_wing_repaired)."""
     df = pd.read_csv(csv_path, index_col=0)
     df = df[df["IsEndOfDay"]].copy()
     df["asof"] = pd.to_datetime(df["AsOfTime"]).dt.tz_localize(None).dt.normalize()
@@ -60,6 +66,11 @@ def load_surfaces(csv_path):
     vols = df[_MON_COLS].to_numpy(dtype=float).copy()
     n_repaired = _repair_upper_wing(vols)
     df[_MON_COLS] = vols
+    return df, n_dupes, n_repaired
+
+
+def load_surfaces(csv_path):
+    df, n_dupes, n_repaired = load_clean_frame(csv_path)
 
     dates, spot, grids = [], [], []
     curve_ttms, curve_lndf, curve_lnfr = [], [], []
