@@ -10,6 +10,54 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-10-05 — Rainbow attribution on an ATM-call book: uncapped, the book becomes a short-variance position with vega as a first-class risk
+
+- Question (user): show the `rainbow_attribution.ipynb` result for a book of
+  **at-the-money rainbow calls** instead of the 100/112 call spread. Method:
+  the same daily-sold \$1M 1Y ranked-basket book, copula, CRN Sobol engine
+  and sticky-strike attribution, with the cap removed (`k_hi=np.inf`). Nothing
+  else changes. Conclusion: the machinery transfers unchanged (top-level
+  resid 0.39% of P&L std, equity Taylor resid 1.0% with no drift), but the
+  economics don't. The raw book loses −\$115M against \$134M of premium
+  (−\$109M of it unhedged delta into the rally). The desk's delta-hedged view
+  is −\$5.8M at **\$182k daily std (2× the spread's \$94k)**: +\$71.3M of gamma
+  theta vs −\$57.7M of realized gamma + cross-gamma (a +\$13.5M variance
+  harvest the spread never had), eaten by **−\$22.0M of fixed-strike vol**
+  (spread −\$0.3M). COVID's six weeks cost −\$10.8M; the rest of the history
+  made +\$5.0M. The vol line is largely *move-driven*: day returns + squared
+  returns explain R² 0.29 of it, the squared term alone −\$32.9M; quiet days
+  (all |ret| < 0.5%) earn +\$8.3k/day; SPX < −2% days cost −\$17.5M. Two sign
+  flips vs the spread: every cross-gamma pair is now a loss (−\$8.7M total;
+  uncapped basket convexity is long every pair, and SPX–SX5E is the smallest
+  despite the biggest weight × correlation, so the rank kink still partly
+  offsets), and `cross_ev` is +\$6.2M (spread −\$6.6M). Open question this
+  raises: the sticky-strike-delta-hedged ATM book keeps an SPX beta
+  (corr(desk, ret_spx) 0.33 vs 0.14 on the spread, via fixed-strike vols
+  falling on up days). The SS-hedges-best verdict was measured on the spread
+  and should be re-measured on this book before it's assumed here.
+- Record: `rainbow_attribution_ss(sds, k_hi=np.inf)` — payoff args already
+  passed through `price_sobol_batch` and `_intrinsic` (torch `clamp(0, inf)`
+  is a plain max), so no library change was needed. Third pass in
+  `scripts/run_rainbow_attribution.py` (PASSES now carry driver kwargs) →
+  `data/rainbow_attribution_ss_atm.csv` (1,968 date pairs, 532s GPU,
+  gitignored). Notebook `rainbow_attribution_atm.ipynb` (22 cells, 3s,
+  mirrors the spread notebook section by section + a vol-vs-returns
+  regression cell + an ATM-vs-spread side-by-side). Pre-run 512-path check for
+  the uncapped payoff: fresh ATM vintage \$75.1k (2026-07-31) / \$122.7k
+  (2020-03-16), per-contract scramble std \$343 at 512 paths / \$123 at 2,048
+  (spread ~\$100 at 2,048). A 30-day COVID slice (from 2020-02-20) at 512 vs
+  2,048 paths matches every component total within 0.5%, and the gamma/eq_resid
+  split moves ~\$25k on \$6M. Numbers: premium mean \$68.0k/vintage (range
+  \$42.8k–\$127.5k), final mark −\$28.0M (spread −\$20.6M), eq_delta by index
+  SPX −70.0 / SX5E −30.9 / HSI −8.2 \$M, eq_gamma −25.4 / −20.6 / −3.1, xgamma
+  SPX–SX5E −2.13 / SPX–HSI −2.54 / SX5E–HSI −3.97, vol −14.7 / −6.6 / −1.0
+  (negative every year 2019–2026, 2020 −8.4), theta_value −5.07 vs theta_delta
+  +5.01 (nearly cancel on the larger delta position), theta_gamma +\$36.2k/day
+  mean (\$26k std, positive every year). Desk hedged std \$182k → \$142k after the
+  gamma matrix (spread \$94k → \$67k), skew −4.0 → −0.4, worst days 2020-03-09
+  −\$2.2M and 2025-04-07 −\$2.0M. eq_resid worst \$434k on 2020-03-12; top
+  resid worst \$129k on 2020-03-09.
+
 ## 2026-08-27 — PDE-vs-MC demonstration: full-path Monte Carlo converges to the RILA PDE reference on every date and every seasoning state
 
 - Follow-up to the RILA build (user, same day): the PDE-is-the-value-of-record
