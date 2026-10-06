@@ -1001,6 +1001,187 @@ def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
     return pd.DataFrame(rows).set_index("date")
 
 
+def _cat_batches(bs):
+    """Stack several same-shaped QuadBatches along B (one pricing call for
+    many bump combos of one book; repeat the slots alongside so every
+    position keeps its CRN point set)."""
+    cat = lambda f: torch.cat([getattr(b, f) for b in bs], 0)
+    return QuadBatch(x=cat("x"), cdf=cat("cdf"),
+                     psi=None if bs[0].psi is None else cat("psi"),
+                     chol=cat("chol"), g=cat("g"), df=cat("df"))
+
+
+def rainbow_regression_delta(sds, betas=None, recut=("sm", "ss"), n_paths=512,
+                             n_slots=256, seed=1, eps=0.01, device=None,
+                             weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI,
+                             notional=NOTIONAL, corr_horizon=5, corr=None,
+                             t_slice=None, progress=None):
+    """Daily bump deltas of the daily-sold book under a family of assumed
+    surface responses to the spot move (user spec 2026-10-05: "bump the
+    equity and co-bump the implied vol surface by its correlation with the
+    equity"). Every delta is the same central bump — index j's spot to
+    S_j(1 +- eps), its seasoning g_j scaled, its tables rebuilt from the
+    pillar grid shifted by `beta_j * (+-eps)` — so the three frameworks
+    are three beta surfaces fed through one seam (MarginalFactory.tables
+    dgrid):
+
+      "sm"   beta = 0: tables frozen, the smile rides with spot
+             (sticky moneyness; the autograd delta's construct).
+      "ss"   the sticky-strike relabeling sigma_new(m) = sigma_old(m(1+eps))
+             (strike_shift_dgrid; the attribution_ss / book_greeks delta —
+             identical construct, same CRN points, matches that cache to fp).
+      user labels: additive (8, 13) pillar shifts per unit relative move,
+             e.g. rainbow.spot_vol_betas(...).beta per index — the
+             minimum-variance / regression delta.
+
+    `betas`: {label: {index name: (8, 13) array}}. Output per date: sold-book
+    delta per index in $ per unit relative move (`delta_<label>_<idx>`), the
+    delta P&L `eq_delta_<label>` = sum_j delta_j * ret_j (the attribution
+    convention), the full-reval `pl` (same construct as both attribution
+    drivers) and the realized returns. `recut`: labels whose eq/vol/cross
+    are also re-cut consistently off the t-1 close — eq = all spots -> t with
+    each grid shifted by beta_j * ret_j (the response the delta assumes),
+    vol = day-t surfaces net of that shift (the regression residual of the
+    surface), cross = the rest, so eq + vol + cross = plain day-t tables at
+    g1 exactly; per-index vol singles `vol_<label>_<idx>` too. "sm" and
+    "ss" recuts reproduce the two attribution drivers' eq/vol/cross lines.
+    Cost: 3 + 6 + 6 k table builds (the +- pair of each bump is one build)
+    and 2 + 6 + 6 k pricings per date for k user betas, plus ~6 builds and
+    ~5 pricings per recut label; ~0.4 s/date at the 512-path standard for
+    five betas and one recut."""
+    dev = device or default_device()
+    spots = spot_panel(sds)
+    names = list(sds)
+    lo = [n.lower() for n in names]
+    d64 = spots.index.values.astype("datetime64[D]")
+    di = {n: np.searchsorted(sds[n].dates, d64) for n in names}
+    if corr is None:
+        corr = historical_corr(spots, corr_horizon).to_numpy()
+    chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
+                           dtype=torch.float64, device=dev)
+    fac = MarginalFactory(sds, device=dev)
+    zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+    sp = spots.to_numpy()
+    expiry = d64 + np.timedelta64(365, "D")
+    t64 = lambda a: torch.as_tensor(np.asarray(a, dtype=float),
+                                    dtype=torch.float64, device=dev)
+    P = lambda b, sl: price_sobol_batch(b, zsets, slots=sl, weights=weights,
+                                        k_lo=k_lo, k_hi=k_hi, notional=notional)
+    betas = dict(betas or {})
+    for k in ("sm", "ss"):
+        if k in betas:
+            raise ValueError(f"label {k!r} is reserved")
+    labels = ["sm", "ss", *betas]
+    bt = {L: {n: t64(betas[L][n]) for n in names} for L in betas}
+    for L in bt:
+        for n in names:
+            if tuple(bt[L][n].shape) != (len(TTM_PILLARS), len(MONEYNESS)):
+                raise ValueError(f"beta[{L!r}][{n!r}] must be (8, 13)")
+    recut = tuple(recut or ())
+    if set(recut) - set(labels):
+        raise ValueError(f"recut labels {set(recut) - set(labels)} unknown")
+    shape = (len(TTM_PILLARS), len(MONEYNESS))
+    rows = []
+    t_lo, t_hi = t_slice if t_slice is not None else (1, len(d64))
+    for t in range(max(t_lo, 1), min(t_hi, len(d64))):
+        s_idx = np.nonzero(expiry[:t] > d64[t - 1])[0]
+        B = len(s_idx)
+        tau0 = (expiry[s_idx] - d64[t - 1]).astype(float) / 365.0
+        tau1 = (expiry[s_idx] - d64[t]).astype(float) / 365.0
+        tau1f = np.maximum(tau1, 1e-6)
+        settle = torch.as_tensor(tau1 <= 0, device=dev)
+        g0, g1 = t64(sp[t - 1] / sp[s_idx]), t64(sp[t] / sp[s_idx])
+        slots = torch.as_tensor(s_idx % n_slots, device=dev)
+        u = sp[t] / sp[t - 1]
+        ret = u - 1.0
+        i0 = {n: di[n][t - 1] for n in names}
+        i1 = {n: di[n][t] for n in names}
+        tau2 = np.concatenate([tau0, tau0])
+
+        base = [fac.tables(n, i0[n], tau0) for n in names]
+
+        def pm(n, d_plus, d_minus):      # (+, -) tables of one index, one build
+            d = torch.stack([d_plus.expand(B, *shape),
+                             d_minus.expand(B, *shape)]).reshape(2 * B, *shape)
+            tb = fac.tables(n, i0[n], tau2, dgrid=d)
+            return tuple(a[:B] for a in tb), tuple(a[B:] for a in tb)
+
+        bumped = {}
+        for j, n in enumerate(names):
+            bumped[("sm", j)] = (base[j], base[j])
+            bumped[("ss", j)] = pm(n, fac.strike_shift_dgrid(n, i0[n], eps),
+                                   fac.strike_shift_dgrid(n, i0[n], -eps))
+            for L in betas:
+                bumped[(L, j)] = pm(n, eps * bt[L][n], -eps * bt[L][n])
+
+        usd = names[0]
+        df0 = fac.discount(usd, i0[usd], tau0)
+        df_full = fac.discount(usd, i1[usd], tau1f)
+        mk = lambda tbls, g, df: fac.batch(tbls, g, df, chol)
+        pv_base = P(mk(base, g0, df0), slots)
+
+        delta = {}
+        for L in labels:
+            bs = []
+            for j in range(3):
+                for sgn, k in ((1, 0), (-1, 1)):
+                    tbls = list(base)
+                    tbls[j] = bumped[(L, j)][k]
+                    g = g0.clone()
+                    g[:, j] = g[:, j] * (1.0 + sgn * eps)
+                    bs.append(mk(tbls, g, df0))
+            pv = P(_cat_batches(bs), slots.repeat(6)).reshape(6, B).sum(1)
+            delta[L] = (-(pv[0::2] - pv[1::2]) / (2 * eps)).cpu().numpy()
+
+        full = [fac.tables(n, i1[n], tau1f) for n in names]
+        pv_full = torch.where(settle, _intrinsic(g1, weights, k_lo, k_hi,
+                                                 notional),
+                              P(mk(full, g1, df_full), slots))
+        s = lambda v: -float(v.sum())               # sold book
+        row = {"date": spots.index[t], "n_pos": B,
+               "n_settle": int(settle.sum()), "pl": s(pv_full - pv_base),
+               **{f"ret_{n}": ret[j] for j, n in enumerate(lo)}}
+        for L in labels:
+            row.update({f"delta_{L}_{n}": float(delta[L][j])
+                        for j, n in enumerate(lo)})
+            row[f"eq_delta_{L}"] = float(delta[L] @ ret)
+
+        if recut:
+            ev = [fac.tables(n, i1[n], tau0, di_curve=i0[n]) for n in names]
+            pv_ev = P(mk(ev, g1, df0), slots)
+            for L in recut:
+                if L == "sm":
+                    teq, tvol = base, ev
+                elif L == "ss":
+                    teq = [fac.tables(n, i0[n], tau0,
+                                      dgrid=fac.strike_shift_dgrid(n, i0[n], u[j] - 1.0))
+                           for j, n in enumerate(names)]
+                    tvol = [fac.tables(n, i1[n], tau0, di_curve=i0[n],
+                                       dgrid=fac.strike_shift_dgrid(n, i1[n], 1.0 / u[j] - 1.0))
+                            for j, n in enumerate(names)]
+                else:
+                    teq = [fac.tables(n, i0[n], tau0, dgrid=bt[L][n] * ret[j])
+                           for j, n in enumerate(names)]
+                    tvol = [fac.tables(n, i1[n], tau0, di_curve=i0[n],
+                                       dgrid=-bt[L][n] * ret[j])
+                            for j, n in enumerate(names)]
+                pv_eq = P(mk(teq, g1, df0), slots)
+                pv_vol = P(mk(tvol, g0, df0), slots)
+                singles = [mk([tvol[m] if m == j else base[m] for m in range(3)],
+                              g0, df0) for j in range(3)]
+                pv_vol1 = P(_cat_batches(singles), slots.repeat(3)).reshape(3, B)
+                row[f"eq_{L}"] = s(pv_eq - pv_base)
+                row[f"vol_{L}"] = s(pv_vol - pv_base)
+                row[f"cross_{L}"] = s(pv_ev - pv_eq - pv_vol + pv_base)
+                row.update({f"vol_{L}_{n}": s(pv_vol1[j] - pv_base)
+                            for j, n in enumerate(lo)})
+        rows.append(row)
+        if progress and t % progress == 0:
+            print(f"  {t}/{len(d64) - 1} {spots.index[t].date()} n_pos={B}",
+                  flush=True)
+    return pd.DataFrame(rows).set_index("date")
+
+
 # ---------------------------------------------------------------------------
 # Historical 1-day VaR on the rainbow book: nested full revaluation vs the
 # formula-free bumped-greeks projection (the vanilla var.py design, three

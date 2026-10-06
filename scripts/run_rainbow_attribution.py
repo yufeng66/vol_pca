@@ -5,7 +5,10 @@ the sticky-moneyness driver (2,048 calibrated paths), the sticky-strike
 re-cut (512-path book standard, incl. the bump delta/gamma/cross-gamma
 attribution of the equity move), and the same sticky-strike driver on the
 uncapped ATM-call book (k_hi = inf: one $1M 1Y 100-strike ranked-basket call
-sold per date instead of the 100/112 spread). Each pass caches its per-date
+sold per date instead of the 100/112 spread), and the sticky-moneyness driver
+on that ATM book at the same 512 paths/seed (its fixed-moneyness vol line and
+autograd delta are the comparison set for rainbow_regression_delta.ipynb and
+the vol-trend decomposition in the changelog). Each pass caches its per-date
 book-level component table and is skipped if its CSV exists; remove a CSV to
 force a recompute.
 
@@ -26,7 +29,9 @@ DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 PASSES = [(DATA / "rainbow_attribution.csv", rainbow_attribution, {}),
           (DATA / "rainbow_attribution_ss.csv", rainbow_attribution_ss, {}),
           (DATA / "rainbow_attribution_ss_atm.csv", rainbow_attribution_ss,
-           {"k_hi": np.inf})]
+           {"k_hi": np.inf}),
+          (DATA / "rainbow_attribution_sm_atm.csv", rainbow_attribution,
+           {"k_hi": np.inf, "n_paths": 512})]
 
 
 def main():

@@ -361,3 +361,90 @@ def bs_implied_vol(price, fwd, strike, ttm, df=1.0, hi=5.0):
         if df * max(f - k, 0.0) < p < df * f:
             out[i] = brentq(lambda s: black76(f, k, ttm, s, df)[0] - p, 1e-6, hi)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Spot-response of a surface: the three deltas as three beta surfaces.
+# A bump delta moves S -> S(1+eps) and asks what the moneyness-quoted
+# surface does. Sticky moneyness says nothing (beta = 0: the smile rides
+# with spot, tables frozen); sticky strike says sigma_new(m) = sigma_old(m
+# (1+eps)), i.e. the pillar shift m * dsigma/dm per unit move
+# (sticky_strike_beta); the regression delta (user spec 2026-10-05) lets
+# the data answer: the in-sample OLS slope of each pillar's fixed-moneyness
+# change on the index's own return (spot_vol_betas). All three feed the same
+# bump through MarginalFactory.tables(dgrid=beta * eps).
+
+
+@dataclass
+class SpotVolBetas:
+    """Per-pillar in-sample response of one surface to its own spot return
+    (fixed-moneyness pillar change regressed on the simple return over the
+    same `horizon` steps of the date axis). `beta` is in vol-decimal per
+    unit return (e.g. -0.6 = -0.6 vol pts per 1%); `r2` per pillar."""
+    beta: np.ndarray
+    alpha: np.ndarray
+    r2: np.ndarray
+    n: int
+    horizon: int
+
+
+def _date_idx(sd, dates):
+    if dates is None:
+        return np.arange(len(sd.dates))
+    d = np.asarray(dates, dtype="datetime64[D]")
+    idx = np.searchsorted(sd.dates, d)
+    ok = (idx < len(sd.dates)) & (sd.dates[np.minimum(idx, len(sd.dates) - 1)] == d)
+    if not ok.all():
+        raise KeyError(f"{(~ok).sum()} dates not quoted by this surface")
+    return idx
+
+
+def spot_vol_betas(sd, dates=None, horizon=1, min_abs_ret=None):
+    """OLS slope (with intercept) of every pillar's fixed-moneyness vol
+    change on the index's own simple return, over consecutive entries of
+    `dates` (default: every quoted date; pass the joint-date axis so the
+    pairs are the attribution's day pairs). horizon=h regresses h-step
+    changes on h-step returns (overlapping windows). min_abs_ret keeps
+    only observations with |ret| >= threshold (the big-move variant).
+    In sample on purpose (user, 2026-10-05)."""
+    idx = _date_idx(sd, dates)
+    h = int(horizon)
+    if h < 1 or h >= len(idx):
+        raise ValueError("horizon must be in [1, len(dates))")
+    g, s = sd.grids[idx], sd.spot[idx]
+    dg = g[h:] - g[:-h]
+    ret = s[h:] / s[:-h] - 1.0
+    if min_abs_ret is not None:
+        keep = np.abs(ret) >= min_abs_ret
+        dg, ret = dg[keep], ret[keep]
+    if len(ret) < 3:
+        raise ValueError("too few observations for a regression")
+    x = ret - ret.mean()
+    y = dg - dg.mean(0)
+    beta = np.einsum("n,nij->ij", x, y) / (x @ x)
+    alpha = dg.mean(0) - beta * ret.mean()
+    resid = y - x[:, None, None] * beta
+    ss_tot = (y ** 2).sum(0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(ss_tot > 0, 1.0 - (resid ** 2).sum(0) / ss_tot, 0.0)
+    return SpotVolBetas(beta=beta, alpha=alpha, r2=r2, n=len(ret), horizon=h)
+
+
+def sticky_strike_beta(sd, dates=None, eps=1e-4):
+    """The pillar shift per unit relative spot move that the sticky-strike
+    relabeling implies: d/d eps of sigma(m (1+eps)) = m * dsigma/dm, read
+    through the pricing interpolant (central difference; the 50/150 edge
+    columns clamp as in MarginalFactory.strike_shift_dgrid) and averaged
+    over `dates`. Negative on a negatively skewed smile: spot up, the
+    fixed strike's vol rises, which in moneyness coordinates is the surface
+    shifting DOWN. beta = 0 is sticky moneyness; this is sticky strike;
+    spot_vol_betas is what the data did."""
+    idx = _date_idx(sd, dates)
+    tt, mm = np.meshgrid(sd.ttm_pillars, sd.moneyness, indexing="ij")
+    out = np.zeros(tt.shape)
+    kw = dict(ttm_pillars=sd.ttm_pillars, moneyness=sd.moneyness)
+    for i in idx:
+        up = grid_lookup(sd.grids[i], tt.ravel(), (mm * (1 + eps)).ravel(), **kw)
+        dn = grid_lookup(sd.grids[i], tt.ravel(), (mm * (1 - eps)).ravel(), **kw)
+        out += (up - dn).reshape(tt.shape) / (2 * eps)
+    return out / len(idx)

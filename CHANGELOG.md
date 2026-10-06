@@ -10,6 +10,161 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-10-05 — Regression (minimum-variance) delta on the ATM book, exact: lowest daily variance, worse drift, no β horizon dominates sticky strike
+
+- Question (user): build the alternative delta — bump the equity and, when
+  you do, co-bump every point of the implied-vol surface by its in-sample
+  regression slope on that equity's return — and measure it against the
+  current sticky-strike bump delta. Method: the three frameworks are one
+  central 1% bump with three assumed surface responses β(τ, m) fed through
+  the factory's additive `dgrid` seam — β = 0 (tables frozen, sticky
+  moneyness), β = m·∂σ/∂m (the strike relabeling, sticky strike) and
+  β = the per-pillar OLS slope of fixed-moneyness changes on the index's
+  own return (`spot_vol_betas`, in sample on the joint-date axis, horizons
+  1/5/20/60 days + a |ret| ≥ 1% variant). New driver
+  `rainbow_regression_delta` (`rainbow_torch.py`), one GPU pass over the
+  history for all seven deltas plus consistent eq/vol/cross recuts for
+  three of them; notebook `rainbow_regression_delta.ipynb`. Conclusion:
+  **the exact result lands where the cache-only proxy (previous entry)
+  predicted.** (1) The data's β is only ~10% stronger than the sticky-strike
+  β at the money (SPX 1Y ATM −0.42 vs −0.37 vol pts per 1%, R² 0.72), flat
+  in moneyness where the relabeling's fades and turns positive in the call
+  wing, and nearly horizon-independent (60d: −0.37 = the sticky-strike
+  value); sticky moneyness (β = 0) is the outlier framework. (2) The
+  regression delta sits on the far side of sticky strike from sticky
+  moneyness (mean SPX sold-book delta −\$736k / −\$761k / −\$861k per 1%)
+  and behaves like the minimum-variance delta it is: desk std \$182k →
+  \$177k (−2.6%; ex COVID −3.3%), skew −4.0 → −3.5, COVID −\$10.8M →
+  −\$10.0M at the same −\$2.2M worst day, corr(hedged, SPX) 0.33 → 0.15 —
+  and the drift worsens, −\$11.3M vs −\$5.8M total, −\$1.3M vs +\$5.0M ex
+  COVID, worse in every rally year, better only in 2022. (3) The horizon
+  ladder is monotone toward sticky strike (std 177 → 179 → 179 → 188k,
+  total −11.3 → −10.7 → −10.5 → −8.6M) and never reaches it: at 60 days
+  the std is already worse than SS while the total is still \$2.8M behind,
+  so **no regression horizon dominates sticky strike**; the frontier is
+  daily-β (variance) — sticky strike — sticky moneyness (drift: +\$6.2M,
+  \$311k std, corr 0.68; a market position). (4) The regression cut's vol
+  line is the surface move orthogonal to spot and it trends *harder*
+  (−\$31.0M; −\$25.0M ex COVID vs −\$15.9M at fixed strike) because the
+  response removed — vol falls on up days — was a rally gain for the short
+  book. (5) The big-move β is indistinguishable from the daily β (OLS
+  already weights big days); the redistribution is explicit in the
+  return-bucket table — moderate down days turn from −\$8.1M into +\$1.4M,
+  (+1%, +2%] days from +\$1.9M into −\$12.2M. In-sample βs are the best
+  case for every variance number.
+- Record: `rainbow.spot_vol_betas(sd, dates, horizon, min_abs_ret)` →
+  `SpotVolBetas(beta, alpha, r2, n, horizon)`; `rainbow.sticky_strike_beta`;
+  `rainbow_torch.rainbow_regression_delta(sds, betas, recut, ...)` (labels
+  `sm`/`ss` built in; ± pair = one build on a doubled tau with a (2B, 8, 13)
+  dgrid; six bumps of a label = one `_cat_batches` pricing with repeated
+  slots). Identities tested in `tests/test_rainbow_regdelta.py`: `ss` ≡
+  `rainbow_attribution_ss` delta/eq/vol/cross to fp, `sm` recut ≡
+  `rainbow_attribution` eq/vol/cross to fp, β = 0 ≡ frozen-table bump, flat
+  world collapses every label, `sticky_strike_beta` through the seam
+  recovers the SS delta to <5% of the SS–SM gap (planted-slope recovery for
+  the regression). Caches `data/rainbow_regdelta.csv` +
+  `data/rainbow_regdelta_betas.npz` via `scripts/run_rainbow_regdelta.py`
+  (1,968 dates in 1,093 s). **Pitfall**: the mixed B / 2B / 6B batches
+  fragment PyTorch's caching allocator — the first run crawled at 3.4 s/date
+  with reserved memory pinned at the 8GB ceiling (7× the cost model);
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` + chunked driver calls
+  with `torch.cuda.empty_cache()` between them restored 0.55 s/date. The
+  frozen-table bump reproduces the autograd SM delta's P&L to \$0.03M on
+  \$6.2M. Hedged yearly \$M (SS / h1 / SM): 2021 1.37 / 0.61 / 5.99, 2022
+  −0.14 / 0.71 / −5.57, 2024 0.26 / −0.86 / 3.38, 2025 −1.39 / −2.32 / 1.87.
+
+## 2026-10-05 — Three deltas on the ATM book: sticky-strike vs sticky-moneyness vs regression (minimum-variance) delta, from the two attribution caches
+
+- Question (user): would a bump delta that co-moves the vol surface by its
+  empirical correlation with spot (the Hull–White minimum-variance delta in
+  bump form) be a better hedge for the ATM book? Method: cache-only proxy —
+  the SS desk-hedged series (`pl − eq_delta_SS − theta_value − theta_delta`),
+  the same with the SM autograd `eq_delta` from `rainbow_attribution_sm_atm.csv`
+  (pl identical to fp), and a regression delta approximated by removing the
+  trailing-250d beta of the SS-hedged P&L to the three index returns
+  (in-sample version = ceiling). Conclusion: **no single delta wins both
+  objectives.** Regression delta: zero market beta, std −4% out of sample
+  (−8% in-sample ceiling), better tail (COVID −8.5M vs −10.8M, skew −3.3 vs
+  −3.8), but a *worse* drift — −11.1M vs −6.1M on the same dates (−12.7M
+  in-sample), losing to SS in every rally year — because the daily beta is
+  the mean-reverting level anticorrelation (hedged book +\$28k per 1% SPX),
+  so the MV delta holds *less* stock than BS, the opposite direction from the
+  slide. SM delta: fixes the drift (+6.3M total, +25.0M ex COVID, better in
+  every rally year) but std \$311k = 1.7× SS, COVID −18.7M, worst day −4.3M,
+  corr(hedged, ret_spx) +0.68 — a long-market tilt that paid in a bull
+  market, not a hedge; in 2022 it lost −5.6M vs SS −0.1M. Ordering of the
+  call delta: MV < BS(SS) < SM; the choice is a horizon/objective question
+  (daily variance vs cumulative drift). Re-measures the spread-book
+  SS-hedges-best verdict for the ATM book: SS still wins on daily std and
+  tail; SM wins only on drift. Rolling betas are unstable (10–90%: −13k…+52k
+  per 1% SPX), and the level piece is convex in returns, so a linear β
+  under-hedges crashes.
+- Record: approximations only — a real regression delta needs per-pillar
+  β(m,τ) from rolling fixed-moneyness pillar Δσ regressions, co-bumped via
+  the `dgrid` seam with tables rebuilt at the bumped spot (SM bump +
+  correction; algebraically the same as the fixed-strike route). The
+  SM-hedged theta pieces reuse the SS `theta_delta` (SS deltas × forward
+  decay) — a small inconsistency, −0.06M scale. Yearly hedged \$M (SS/SM/MV):
+  2021 1.37/5.99/−0.95, 2022 −0.14/−5.57/+1.52, 2025 −1.39/1.87/−3.33.
+
+## 2026-10-05 — Why the ATM book's vol line trends: fixed-moneyness vol is range-bound (ex COVID), the drift is strikes sliding down the skew in the rally
+
+- Question (user): the −\$22.0M `vol` line in the desk-hedged ATM chart
+  trends down for seven years — vol goes up and down, so why isn't it
+  range-bound? Method: run the sticky-moneyness driver on the same ATM book
+  at the same 512 paths/seed (`rainbow_attribution(sds, n_paths=512, seed=1,
+  k_hi=np.inf)`, 330 s) and subtract: `vol_SS − vol_SM` is exactly the
+  fixed-strike-vs-fixed-moneyness difference, i.e. the P&L of each strike's
+  *position on the smile* moving as spot moves (the pl and eq+vol+cross
+  totals of the two drivers agree to fp, so the split is clean). Conclusion:
+  the user's intuition is right for vol at fixed moneyness — that line is
+  −\$16.3M, of which **−\$15.5M is the COVID window** (2020-02-20 → 04-03)
+  and the other 7+ years net to **−\$0.85M**; it oscillates with the vol
+  level (2022 −\$6.2M, 2023 +\$3.2M) and the level itself ended lower than
+  it started (SPX 1Y ATM 20.3 → 18.1). The COVID spike was never earned back
+  because a daily-sold ATM book carries maximum vega when the market sits at
+  its strikes and little after any big move: the pre-crash vintages went 30%
+  OTM, and the post-crash vintages ran deep ITM in the +70% rebound while vol
+  decayed, so the book paid for the spike on full vega and collected the
+  decay on a fraction of it. The **trend** is the other piece, the slide:
+  −\$5.7M net, but +\$9.4M in COVID and **−\$15.1M outside it**, negative in
+  every rally year (2019 −2.1, 2021 −3.8, 2023 −3.4, 2024 −2.6, 2025 −2.5,
+  2026 −1.5) and positive only when strikes move back out of the money
+  (2020 +4.2, 2022 +5.9). The book sells ATM every day and SPX tripled
+  (2,507 → 7,490), so every strike rides down a ~3.6-pt/10-mon 1Y skew into
+  the money, repricing at ever-higher fixed-strike vol — a short-vega loss
+  that compounds with the spot trend instead of mean-reverting with the vol
+  level. Almost all of it is SPX (−\$5.0M of the −\$5.7M; SX5E −\$0.6M,
+  HSI 0). Day to day the two pieces offset (corr with ret_spx: fixed-moneyness
+  +0.73, slide −0.83; stds \$292k vs \$187k vs \$146k for the SS line),
+  which is why the sticky-strike cut looks calmer, but the level is bounded
+  and the slide is not. Implication for the open question in the previous
+  entry: the SPX beta the sticky-strike delta leaves in the ATM book *is*
+  this slide — a sticky-moneyness delta would move it into `eq_delta` and
+  have earned it on the hedge; the SS-vs-SM hedge verdict needs re-measuring
+  on this book.
+- Record: cache `data/rainbow_attribution_sm_atm.csv` (sticky-moneyness
+  driver, ATM book, 512 paths, seed 1 — NOT in
+  `scripts/run_rainbow_attribution.py`'s PASSES; regenerate with the call
+  above). SM driver columns differ from SS: `cross_sv` (≡ SS `cross_ev` role),
+  `vol` = per-index singles + `vol_cross`, `time`/`time_roll`/`time_other`.
+  Identity check: `eq+vol+cross` and `pl` match the SS cache to <1e-4 \$.
+  Per-vintage proxy (BS vega on each index's own smile, basket weights
+  0.4/0.4/0.2, `grid_lookup` at m/u vs m) tracks the exact per-index vol
+  lines at corr 0.95/0.98/0.86 and gives the same qualitative split, but
+  understates SPX's level by ~\$6M — the uncapped basket call's vega is not a
+  single smile point; use the engine split, not the proxy, for numbers.
+  Regression follow-up (user): regressing the green line on daily (or
+  monthly/quarterly) index returns does NOT remove the trend — the return
+  betas are ≈0 (daily +\$7M fitted, quarterly R² 0.00 ex COVID) and the
+  intercept carries −\$23M ex COVID (t≈−4). Cause: the two spot-driven pieces
+  have mirror-image betas — slide ~ rets R² 0.88 with cumulative fitted
+  −\$23M (spx −13.6, sx5e −9.0; t −21/−24), level ~ rets R² 0.67 with
+  +\$30M fitted and a −\$31M intercept (the bounded level mean-reverting
+  back against the trending regressor) — so they cancel in the total's beta
+  and the level piece's mean-reversion intercept masquerades as an
+  'unexplained' drift. Only the SS−SM structural split separates them.
+
 ## 2026-10-05 — Rainbow attribution on an ATM-call book: uncapped, the book becomes a short-variance position with vega as a first-class risk
 
 - Question (user): show the `rainbow_attribution.ipynb` result for a book of
