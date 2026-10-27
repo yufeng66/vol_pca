@@ -58,7 +58,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the gpu 
         "(uv sync --group gpu)") from exc
 
 from vol_pca.rainbow import (K_HI, K_LO, NOTIONAL, WEIGHTS, historical_corr,
-                             spot_panel)
+                             profile_tables, profile_uniforms, spot_panel)
 from vol_pca.surface import MONEYNESS, TTM_PILLARS, grid_lookup
 
 _EPS = 1e-16                     # cdf clip for normal scores, as in rainbow.py
@@ -239,10 +239,22 @@ def price_quad_batch(batch, n_outer=48, n_inner=48, weights=WEIGHTS,
     return df * (node_w * cond).sum(-1) * notional
 
 
+def sobol_points(n_slots, n_paths, d=3, seed=0):
+    """One scrambled Sobol point set per book slot, (S, N, d) uniforms on
+    the CPU with scipy's generator (the same one the numpy engine uses);
+    slot scrambles are independent (spawned seed sequences)."""
+    if n_paths & (n_paths - 1):
+        raise ValueError("n_paths must be a power of two for balanced Sobol")
+    k2 = int(np.log2(n_paths))
+    return np.stack([qmc.Sobol(d=d, scramble=True,
+                               seed=np.random.default_rng(c)).random_base2(k2)
+                     for c in np.random.SeedSequence(seed).spawn(n_slots)])
+
+
 def sobol_normals(n_slots, n_paths, seed=0, device=None):
     """One scrambled Sobol point set per book slot, as standard normals
-    (S, N, 3): generated once on the CPU with scipy's generator (the same
-    one the numpy engine uses), moved to the device once, then resident.
+    (S, N, 3): generated once on the CPU, moved to the device once, then
+    resident.
 
     The slot design is the common-random-numbers discipline for the book:
     a vintage keeps its slot's points for every day and every component
@@ -250,36 +262,55 @@ def sobol_normals(n_slots, n_paths, seed=0, device=None):
     scrambles are independent (spawned seed sequences), so book-level
     errors still average down ~sqrt(slots) instead of adding coherently.
     """
-    if n_paths & (n_paths - 1):
-        raise ValueError("n_paths must be a power of two for balanced Sobol")
     device = device or default_device()
-    k2 = int(np.log2(n_paths))
-    u = np.stack([qmc.Sobol(d=3, scramble=True,
-                            seed=np.random.default_rng(c)).random_base2(k2)
-                  for c in np.random.SeedSequence(seed).spawn(n_slots)])
+    u = sobol_points(n_slots, n_paths, 3, seed)
     return torch.as_tensor(norm.ppf(u), dtype=torch.float64, device=device)
 
 
-def price_sobol_batch(batch, normals, slots=None, weights=WEIGHTS, k_lo=K_LO,
-                      k_hi=K_HI, notional=NOTIONAL, max_bytes=2 << 30):
+def sobol_uniforms_profile(n_slots, n_paths, a_of_w, breaks=(), seed=0,
+                           device=None):
+    """The correlation-profile analogue of sobol_normals: per-slot d = 4
+    points (W, e_1..e_3) mapped on the CPU through rainbow.profile_uniforms
+    (exact marginals; the CDF tables built once) to copula uniforms
+    (S, N, 3), device-resident — feed price_sobol_batch(uniforms=...). The
+    profile is a property of the copula, not of the problem, so the
+    uniforms are fixed for a whole book and history: the same CRN discipline
+    as the normals, with the copula mapping done once instead of per
+    pricing. Numerically the numpy engine's own code, so parity is by
+    construction."""
+    device = device or default_device()
+    pts = sobol_points(n_slots, n_paths, 4, seed)
+    tabs = profile_tables(a_of_w, 3, breaks)
+    u = np.stack([profile_uniforms(p, a_of_w, breaks, tables=tabs)
+                  for p in pts])
+    return torch.as_tensor(u, dtype=torch.float64, device=device)
+
+
+def price_sobol_batch(batch, normals=None, slots=None, weights=WEIGHTS,
+                      k_lo=K_LO, k_hi=K_HI, notional=NOTIONAL,
+                      max_bytes=2 << 30, uniforms=None):
     """Scrambled-Sobol sampler on the device — the stochastic mirror of
     price_quad_batch over the same QuadBatch tables (psi not needed).
     Mirrors rainbow.price_rainbow/sample_performances step for step:
     correlate the slot's normals with each problem's cholesky, map to
     uniforms, pull each marginal's quantile, season by g, ranked basket,
     capped payoff, discounted mean. Returns a (B,) float64 pv tensor.
-    Fully deterministic given `normals`; all-float64 (the path tensors are
+    Fully deterministic given the points; all-float64 (the path tensors are
     (B, N, 3) — small, so precision is free here).
 
     normals: (S, N, 3) from sobol_normals, or (N, 3) for one shared set.
+    uniforms: alternatively (S, N, 3) copula uniforms already mapped (from
+    sobol_uniforms_profile — the correlation-profile copula); then the
+    batch's cholesky is ignored and the quantile pull starts from them.
     slots: (B,) mapping problem -> point set (default: b % S, which is the
     vintage->slot identity when the batch is a book in sale order).
     """
     x, cdf, L, g, df = batch.x, batch.cdf, batch.chol, batch.g, batch.df
     dev, B = x.device, x.shape[0]
-    if normals.dim() == 2:
-        normals = normals[None]
-    n_sets, n_paths, _ = normals.shape
+    pts = normals if uniforms is None else uniforms
+    if pts.dim() == 2:
+        pts = pts[None]
+    n_sets, n_paths, _ = pts.shape
     slots = (torch.arange(B, device=dev) % n_sets if slots is None
              else torch.as_tensor(slots, dtype=torch.long, device=dev))
     w_b, w_w, w3 = weights
@@ -287,8 +318,11 @@ def price_sobol_batch(batch, normals, slots=None, weights=WEIGHTS, k_lo=K_LO,
     pvs = []
     for i0 in range(0, B, c_b):
         sb = slice(i0, i0 + c_b)
-        z = normals[slots[sb]]                            # (cB, N, 3)
-        u = torch.special.ndtr(torch.einsum("bni,bji->bnj", z, L[sb]))
+        if uniforms is not None:
+            u = pts[slots[sb]]                            # (cB, N, 3)
+        else:
+            z = pts[slots[sb]]                            # (cB, N, 3)
+            u = torch.special.ndtr(torch.einsum("bni,bji->bnj", z, L[sb]))
         perf = torch.stack(
             [g[sb, i, None] * _interp(u[..., i], cdf[sb, i], x[sb, i])
              for i in range(3)], -1)
@@ -822,7 +856,7 @@ def rainbow_attribution(sds, n_paths=2048, n_slots=256, seed=1, device=None,
 def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
                            device=None, weights=WEIGHTS, k_lo=K_LO, k_hi=K_HI,
                            notional=NOTIONAL, corr_horizon=5, corr=None,
-                           t_slice=None, progress=None):
+                           t_slice=None, progress=None, copula=None):
     """The sticky-strike re-cut of rainbow_attribution (user spec
     2026-08-06) — the attribution whose delta line is the sticky-strike
     hedge, so the delta-hedged series settles which framework hedges
@@ -854,6 +888,14 @@ def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
       nonlinearity, folded per spec).
     - fwd, rate, resid, premium, mark: as in the sticky-moneyness driver.
 
+    copula: None = the Gaussian copula on `corr` (default: the 5-day
+    matrix); or (a_of_w, breaks) = a correlation-profile copula (user ask
+    2026-10-27: the crash lift in the hedge target, rainbow.crash_lift_profile)
+    — the whole book is then marked, bumped and hedged under that copula
+    through sobol_uniforms_profile (d = 4 points per slot, same CRN
+    discipline; `corr` is still used for the batch's cholesky field but the
+    sampler ignores it).
+
     Cost: ~30 table builds + 30 pricings/date at the 512-path standard.
     """
     dev = device or default_device()
@@ -866,12 +908,20 @@ def rainbow_attribution_ss(sds, n_paths=512, n_slots=256, seed=1, eps=0.01,
     chol = torch.as_tensor(np.linalg.cholesky(np.asarray(corr, dtype=float)),
                            dtype=torch.float64, device=dev)
     fac = MarginalFactory(sds, device=dev)
-    zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
     sp = spots.to_numpy()
     expiry = d64 + np.timedelta64(365, "D")
     t64 = lambda a: torch.as_tensor(a, dtype=torch.float64, device=dev)
-    P = lambda b, sl: price_sobol_batch(b, zsets, slots=sl, weights=weights,
-                                        k_lo=k_lo, k_hi=k_hi, notional=notional)
+    if copula is None:
+        zsets = sobol_normals(n_slots, n_paths, seed=seed, device=dev)
+        P = lambda b, sl: price_sobol_batch(b, zsets, slots=sl, weights=weights,
+                                            k_lo=k_lo, k_hi=k_hi,
+                                            notional=notional)
+    else:
+        usets = sobol_uniforms_profile(n_slots, n_paths, copula[0], copula[1],
+                                       seed=seed, device=dev)
+        P = lambda b, sl: price_sobol_batch(b, slots=sl, uniforms=usets,
+                                            weights=weights, k_lo=k_lo,
+                                            k_hi=k_hi, notional=notional)
     lo = [n.lower() for n in names]
     rows = []
     t_lo, t_hi = t_slice if t_slice is not None else (1, len(d64))

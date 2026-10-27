@@ -8,7 +8,13 @@ uncapped ATM-call book (k_hi = inf: one $1M 1Y 100-strike ranked-basket call
 sold per date instead of the 100/112 spread), and the sticky-moneyness driver
 on that ATM book at the same 512 paths/seed (its fixed-moneyness vol line and
 autograd delta are the comparison set for rainbow_regression_delta.ipynb and
-the vol-trend decomposition in the changelog). Each pass caches its per-date
+the vol-trend decomposition in the changelog), and (fifth, user ask
+2026-10-27) the sticky-strike driver on the spread book with the **21-day
+crash lift** in the hedge target — the one-parameter correlation-profile
+copula of docs/crash_lift_21d.md (lambda CRASH_LIFT_LAMBDA below, the
+21-day-bin fit; level re-matched to the 5-day matrix) replacing the Gaussian
+copula for every mark, bump and hedge delta; analysed against the Gaussian
+cache in rainbow_attribution_cl.ipynb. Each pass caches its per-date
 book-level component table and is skipped if its CSV exists; remove a CSV to
 force a recompute.
 
@@ -23,15 +29,30 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from vol_pca.data import load_surfaces
+from vol_pca.rainbow import crash_lift_profile, historical_corr, spot_panel
 from vol_pca.rainbow_torch import rainbow_attribution, rainbow_attribution_ss
 
 DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
+CRASH_LIFT_LAMBDA = 0.2466   # 21-day-bin fit (run_rainbow_corr_profile.py)
+
+
+def crash_lift_kw(sds):
+    """The crash-lift copula on the book's own 5-day matrix."""
+    corr = historical_corr(spot_panel(sds), 5).to_numpy()
+    prof, breaks, a = crash_lift_profile(corr, CRASH_LIFT_LAMBDA)
+    print(f"crash lift lambda {CRASH_LIFT_LAMBDA}: plateau loadings "
+          f"{np.round(a, 4)} on the 5-day matrix")
+    return {"copula": (prof, breaks)}
+
+
 PASSES = [(DATA / "rainbow_attribution.csv", rainbow_attribution, {}),
           (DATA / "rainbow_attribution_ss.csv", rainbow_attribution_ss, {}),
           (DATA / "rainbow_attribution_ss_atm.csv", rainbow_attribution_ss,
            {"k_hi": np.inf}),
           (DATA / "rainbow_attribution_sm_atm.csv", rainbow_attribution,
-           {"k_hi": np.inf, "n_paths": 512})]
+           {"k_hi": np.inf, "n_paths": 512}),
+          (DATA / "rainbow_attribution_ss_cl.csv", rainbow_attribution_ss,
+           crash_lift_kw)]
 
 
 def main():
@@ -44,6 +65,7 @@ def main():
             sds = {n: load_surfaces(f"{n}_volSurface.csv")
                    for n in ("SPX", "SX5E", "HSI")}
         t0 = time.time()
+        kw = kw(sds) if callable(kw) else kw
         res = driver(sds, progress=250, **kw)
         print(f"{out.name}: {len(res)} date pairs in "
               f"{time.time() - t0:.0f}s")

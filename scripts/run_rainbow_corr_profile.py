@@ -55,11 +55,11 @@ from scipy.stats import norm, qmc
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from vol_pca.data import load_surfaces
-from vol_pca.rainbow import (call_spread_payoff, date_index, historical_corr,
-                             implied_marginal, one_factor_loadings,
-                             price_rainbow_quad, profile_uniforms,
-                             rainbow_basket, sigmoid_profile, spot_panel,
-                             step_profile)
+from vol_pca.rainbow import (call_spread_payoff, crash_lift_profile,
+                             date_index, historical_corr, implied_marginal,
+                             one_factor_loadings, price_rainbow_quad,
+                             profile_uniforms, rainbow_basket,
+                             sigmoid_profile, spot_panel, step_profile)
 
 DATA = pathlib.Path(__file__).resolve().parents[1] / "data"
 DATES = ["2026-07-31", "2022-03-16", "2024-10-08", "2020-03-16"]
@@ -207,15 +207,12 @@ def main():
     level5 = pair_corr_mat(c5)
 
     def crash_lift(lam):
-        """base loadings re-matched by a fixed point so the unconditional
-        normal-score correlation equals the 5-day matrix; returns profile, scores, loadings"""
-        cb = np.array(c5)
-        for _ in range(4):
-            a = one_factor_loadings(cb)
-            prof = sigmoid_profile(a, lam, 0.0, C_DN, 99.0, WIDTH)
-            z = norm.ppf(profile_uniforms(pts_fit, prof, (C_DN,)))
-            for (i, j), g in zip(PAIRS, level5 - pair_corr(z)):
-                cb[i, j] = cb[j, i] = cb[i, j] + g
+        """rainbow.crash_lift_profile on the 5-day matrix (the fixed point
+        that re-matches the unconditional level, on the same seed-11 2^17
+        points as pts_fit); returns profile, scores, loadings"""
+        prof, _, a, z = crash_lift_profile(c5, lam, C_DN, WIDTH, n_iter=4,
+                                           n_points=N_FIT, seed=11,
+                                           return_scores=True)
         return prof, z, a
 
     def fit_lambda(bin_target):

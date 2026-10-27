@@ -10,6 +10,80 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-10-27 — The 21-day crash lift as the hedge target: the hedged line drifts up on calm days and gives back a fifth of it in stress
+
+- Question (user): redo the rainbow attribution with the 21-day crash-lift
+  copula in the hedge target — expectation: the desk's delta-hedged line (the
+  black line of chart 5 in `rainbow_attribution.ipynb`) drifts up in normal
+  times to compensate for the stress-time losses. Method: the same
+  sticky-strike driver, book, surfaces, 512-path CRN standard and seed, with
+  every mark, 1%-bump greek and hedge delta taken from the crash lift
+  (`rainbow_attribution_ss(copula=...)`; `crash_lift_profile` on the 5-day
+  matrix, λ 0.2466; per-slot d=4 Sobol points mapped once on the CPU through
+  `profile_uniforms` → `sobol_uniforms_profile` → `price_sobol_batch(uniforms=)`);
+  987 s on the GPU (vs 515 s for the Gaussian pass — a CPU-bound calibration
+  rerun shared the machine); cache `data/rainbow_attribution_ss_cl.csv`;
+  notebook `rainbow_attribution_cl.ipynb` against the Gaussian cache (8 s).
+  Conclusion: **the hypothesis holds in shape, not in proportion.** The hedged
+  line ends +$1.74M higher (−$9.77M vs −$11.51M); +$1.67M of it accrues on the
+  1,542 calm days (every |ret| ≤ 2%: +$1,084/day), +$0.07M on the 426 big-move
+  days, with the COVID window −$0.21M (−$6.4k/day) and 2022 −$0.11M — the
+  give-back is a fifth of the drift. The mechanism is the premium: each
+  vintage sells at its own model mark, +8.9 bps of notional per contract on
+  average (+$1.75M; +5…+8 bps in 2019–21, +10–11 from 2022 on, day range −2…
+  +22 by the book's moneyness), released through theta_gamma (+$0.48M →
+  +$1.69M) and cross_ev (−$6.57M → −$6.06M); the realized sell-offs hurt both
+  models through the same gamma on the same spot moves and the 100/112 cap
+  shelters the copula difference (2026-08-10 verdict), so the reserve is
+  spent by time, not by crashes. Under a market-set sale price the same runs
+  are a timing difference that nets to zero per vintage (market-price view =
+  hedged difference net of the extra premium on its sale date: ~9 bps of
+  day-one P&L deferred into theta; median level −$0.25M, trough −$0.60M in
+  December 2022, ends −$0.01M with +$0.23M of unreleased reserve on the live
+  book). As a hedge target the crash lift is marginally worse on daily risk —
+  std $94.1k → $96.4k, skew −6.2 → −6.5, worst day −$1.47M → −$1.57M — with
+  deltas within ~1–3% (median ratio 1.010 / 1.006 / 1.004, 63-day rolling
+  median 0.97–1.03: above one in the flat/bear phases, below one in the
+  rallies). The morning's recommendation stands: Gaussian 5d as the hedge
+  model, the crash lift as the reserve line.
+- Record: code — `rainbow.profile_tables`, `profile_uniforms(tables=)`,
+  `crash_lift_profile(corr, lam, c_dn=−1, width=0.3, n_iter=4, n_points=2^17,
+  seed=11, return_scores)` (the calibration script's fixed point moved into
+  the package; `run_rainbow_corr_profile.py` calls it, caches re-generated
+  bit-identical); `rainbow_torch.sobol_points(n_slots, n_paths, d)`,
+  `sobol_uniforms_profile`, `price_sobol_batch(normals=None, ...,
+  uniforms=None)`, `rainbow_attribution_ss(copula=(a_of_w, breaks))`; fifth
+  pass of `scripts/run_rainbow_attribution.py` (`CRASH_LIFT_LAMBDA = 0.2466`,
+  built from the book's own 5-day matrix at run time). Tests:
+  `test_sobol_uniforms_profile_replays_numpy` (torch profile path = the numpy
+  pipeline on the same points to 1e-6; a constant profile within sampling
+  noise of the normals path; the lift raises the ATM leg),
+  `test_attribution_ss_copula_flat_world` (identities exact on the copula
+  path, premium within 3% of the Gaussian driver), `test_profile_tables_reuse_is_exact`,
+  `test_crash_lift_profile_rematches_level_and_nests_gaussian` (λ = 0 gives
+  the Gaussian loadings to 1e-3 — the fixed point matches the level on the
+  fit points, ~1e-4; the plateau is flat from W = +1 on, the lift at W = 0 is
+  still ~1% because the sigmoid tail reaches it). Short-slice check on the
+  real book (first 10 dates): a constant-profile run vs the Gaussian cache —
+  pl within $0.9k (daily std $17k), premium within $0.6k, mark within $2.1k:
+  the sampling noise of two different point sets; the crash lift's premium
+  +$0.9k/contract (+5…+14 bps) on those dates.
+- Record: totals (Gaussian → crash lift, $M): pl −65.71 → −64.18; eq_delta
+  −52.12 → −52.23; eq_gamma −8.00 → −7.98; eq_xgamma +3.20 → +3.45; vol −0.32
+  → −0.83 (SX5E +0.68 → +0.40 — the crash-lift book carries a larger ATM leg,
+  hence more vega); cross_ev −6.57 → −6.06; theta_gamma +0.48 → +1.69;
+  theta_value −3.52 → −3.55; theta_delta +1.44 → +1.37; gamma net of theta
+  −4.33 → −2.84; premium 95.95 → 97.71; final mark −20.64 → −20.87; resid std
+  0.62% of pl std (0.61%), eq_resid std $14.0k both, identities exact. Desk
+  hedged: total −11.51 → −9.77, median −$2.5k → −$1.9k/day, difference series
+  std $4.4k/day. Monthly hedged difference vs the month's mean log return:
+  slope +$2.0k per 1%, intercept +$17.5k/month, corr +0.25, March 2020 −$200k
+  the one large give-back. Caveats: the two runs are not CRN with each other
+  (d=3 vs d=4 points) — day-level difference noise ~$1k against the $94k
+  hedged std, bounded cumulatively (each vintage settles at intrinsic); the
+  premium is model-dependent in this test book (sold at the model mark),
+  which is why the market-price view sits beside the raw difference.
+
 ## 2026-10-27 — Smooth correlation profile calibrated to the 21-day history: a quarter of the package gap, split between legs by the level convention
 
 - Question (user): keep the smooth-profile idea, use the 21-day

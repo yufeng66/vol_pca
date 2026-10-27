@@ -422,18 +422,59 @@ def profile_cdf_table(a_of_w, j, breaks=(), n_w=600, z=None):
     return z, f
 
 
-def profile_uniforms(points, a_of_w, breaks=()):
+def profile_tables(a_of_w, n_indices=3, breaks=()):
+    """The per-index exact CDF tables [(z, F_j)] of a loading profile — a
+    property of the profile alone, so a caller mapping many point sets
+    through one profile builds them once and passes them to
+    profile_uniforms(tables=...)."""
+    return [profile_cdf_table(a_of_w, j, breaks) for j in range(n_indices)]
+
+
+def profile_uniforms(points, a_of_w, breaks=(), tables=None):
     """(n, 4) uniform points (W, e_1..e_3) -> (n, 3) copula uniforms with
-    exactly uniform marginals under the loading profile a_of_w(w, j)."""
+    exactly uniform marginals under the loading profile a_of_w(w, j).
+    tables: optional precomputed profile_tables (else built here)."""
     w = norm.ppf(points[:, 0])
     eps = norm.ppf(points[:, 1:])
     u = np.empty_like(eps)
     for j in range(eps.shape[1]):
         a = a_of_w(w, j)
         zj = a * w + np.sqrt(1.0 - a * a) * eps[:, j]
-        zg, fg = profile_cdf_table(a_of_w, j, breaks)
+        zg, fg = (tables[j] if tables is not None
+                  else profile_cdf_table(a_of_w, j, breaks))
         u[:, j] = np.clip(np.interp(zj, zg, fg), 1e-12, 1 - 1e-12)
     return u
+
+
+def crash_lift_profile(corr, lam, c_dn=-1.0, width=0.3, n_iter=4,
+                       n_points=2 ** 17, seed=11, return_scores=False):
+    """The one-parameter crash lift (2026-10-27, docs/crash_lift_21d.md):
+    sigmoid_profile with a shared down-tail lift `lam` below `c_dn`, no
+    up-tail cut, and the plateau loadings re-matched by a fixed point so the
+    unconditional normal-score correlation equals `corr` (the hedge model's
+    matrix) — the lift is paid for by a lower plateau, so the model differs
+    from the Gaussian copula on `corr` by the tail shape alone. lam = 0 is
+    that Gaussian copula up to the fixed point's sampling precision (the
+    level is matched on the fit points, ~1e-4 in the loadings). Returns
+    (profile, breaks, plateau loadings)
+    and, with return_scores, the normal scores at the fit points (what the
+    calibration script bins). The fit points are a fixed scrambled Sobol set
+    (seed 11, 2^17) so the result is deterministic."""
+    corr = np.array(corr, dtype=float)
+    pairs = ((0, 1), (0, 2), (1, 2))
+    level = corr[[0, 0, 1], [1, 2, 2]]
+    pts = qmc.Sobol(d=4, scramble=True, seed=seed).random_base2(
+        int(np.log2(n_points)))
+    breaks = (c_dn,)
+    cb = corr.copy()
+    for _ in range(n_iter):
+        a = one_factor_loadings(cb)
+        prof = sigmoid_profile(a, lam, 0.0, c_dn, 99.0, width)
+        z = norm.ppf(profile_uniforms(pts, prof, breaks))
+        pc = np.corrcoef(z.T)[[0, 0, 1], [1, 2, 2]]
+        for (i, j), g in zip(pairs, level - pc):
+            cb[i, j] = cb[j, i] = cb[i, j] + g
+    return (prof, breaks, a, z) if return_scores else (prof, breaks, a)
 
 
 def sample_performances_profile(marginals, a_of_w, n_paths, seed=0, breaks=()):

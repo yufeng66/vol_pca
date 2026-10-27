@@ -10,14 +10,17 @@ from scipy.stats import norm
 
 from tests.test_book import _flat_sd
 from vol_pca.data import load_surfaces
-from vol_pca.rainbow import (date_index, historical_corr, implied_marginal,
-                             price_rainbow, price_rainbow_quad, spot_panel)
+from vol_pca.rainbow import (crash_lift_profile, date_index, historical_corr,
+                             implied_marginal, one_factor_loadings,
+                             price_rainbow, price_rainbow_quad,
+                             profile_uniforms, spot_panel, step_profile)
 from vol_pca.rainbow_torch import (MarginalFactory, QuadBatch, QuadProblem,
                                    book_greeks, prepare_book_greeks,
                                    price_quad_batch, price_rainbow_quad_torch,
                                    price_sobol_batch, rainbow_attribution,
                                    rainbow_attribution_ss, rainbow_book_greeks,
-                                   sobol_normals)
+                                   sobol_normals, sobol_points,
+                                   sobol_uniforms_profile)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CSV3 = [ROOT / f"{n}_volSurface.csv" for n in ("SPX", "SX5E", "HSI")]
@@ -125,6 +128,40 @@ def test_sobol_engine_replays_numpy_math(flat_marg):
     oracle = price_rainbow([flat_marg] * 3, CORR, 0.96, n_paths=2 ** 12,
                            seed=0, method="sobol")["pv"]
     assert abs(pv - oracle) < 200.0
+
+
+def _numpy_replay_uniforms(u, marginals, dfr, g):
+    perf = np.column_stack([m.quantile(u[:, j])
+                            for j, m in enumerate(marginals)]) * np.asarray(g)
+    b = (0.5 * np.maximum(perf[:, 0], perf[:, 1])
+         + 0.3 * np.minimum(perf[:, 0], perf[:, 1]) + 0.2 * perf[:, 2])
+    return dfr * np.clip(b - 1.0, 0.0, 0.12).mean() * 1e6
+
+
+def test_sobol_uniforms_profile_replays_numpy(flat_marg):
+    # the profile path: per-slot d=4 points mapped by rainbow.profile_uniforms
+    # on the CPU, then the same quantile pull on the device — must equal the
+    # numpy pipeline on the same points exactly, and a constant profile is
+    # the Gaussian copula (within sampling noise of the normals path)
+    a = one_factor_loadings(CORR)
+    prof, brk = step_profile(a, a), (0.0,)
+    us = sobol_uniforms_profile(1, 2 ** 12, prof, brk, seed=3, device="cpu")
+    batch = QuadBatch.from_problems([QuadProblem((flat_marg,) * 3, CORR, 0.96)],
+                                    "cpu", scores=False)
+    pv = float(price_sobol_batch(batch, uniforms=us)[0])
+    pts = sobol_points(1, 2 ** 12, 4, seed=3)[0]
+    ref = _numpy_replay_uniforms(profile_uniforms(pts, prof, brk),
+                                 [flat_marg] * 3, 0.96, (1, 1, 1))
+    assert abs(pv - ref) < 1e-6
+    gauss = float(price_sobol_batch(batch, sobol_normals(1, 2 ** 12, seed=3,
+                                                         device="cpu"))[0])
+    assert abs(pv - gauss) < 200.0
+    # a real lift moves the price (the crash lift raises the ATM leg)
+    lift, brk2, _ = crash_lift_profile(CORR, 0.25, n_points=2 ** 14)
+    ul = sobol_uniforms_profile(1, 2 ** 12, lift, brk2, seed=3, device="cpu")
+    pv_atm = float(price_sobol_batch(batch, uniforms=ul, k_hi=np.inf)[0])
+    pv_atm_g = float(price_sobol_batch(batch, uniforms=us, k_hi=np.inf)[0])
+    assert pv_atm > pv_atm_g
 
 
 def test_sobol_slots_season_and_chunk(flat_marg):
@@ -427,6 +464,35 @@ def test_attribution_ss_flat_world():
     top = res[["eq", "vol", "cross_ev", "time", "fwd", "rate", "resid"]].sum(axis=1)
     assert np.allclose(top, res["pl"], atol=1e-9)
     assert (res["resid"].abs() < 100.0).all()   # time x spot cross only
+
+
+def test_attribution_ss_copula_flat_world():
+    # the same flat-world identities hold on the correlation-profile path,
+    # and a constant profile reproduces the Gaussian driver's premium within
+    # sampling noise (different points: the Gaussian path draws d=3 normals,
+    # the profile path d=4)
+    paths = {"A": [1.00, 1.01, 0.99, 1.02, 1.005],
+             "B": [1.00, 0.99, 1.01, 0.985, 1.02],
+             "C": [1.00, 1.005, 0.995, 1.01, 0.99]}
+    flat = {}
+    for (n, p), v, s0 in zip(paths.items(), (0.2, 0.25, 0.3), (100.0, 90.0, 80.0)):
+        sd = _flat_sd(n_days=5, vol=v, spot=s0)
+        flat[n] = dataclasses.replace(sd, spot=s0 * np.asarray(p))
+    corr = np.array([[1.0, 0.6, 0.4], [0.6, 1.0, 0.5], [0.4, 0.5, 1.0]])
+    a = one_factor_loadings(corr)
+    kw = dict(n_paths=512, corr=corr, device="cpu", t_slice=(2, 5))
+    res = rainbow_attribution_ss(flat, copula=(step_profile(a, a), (0.0,)), **kw)
+    ref = rainbow_attribution_ss(flat, **kw)
+    for c in ["vol", "vol_a", "vol_b", "vol_c", "vol_resid", "cross_ev",
+              "fwd", "rate"]:
+        assert res[c].abs().max() < 1e-6, c
+    tay = res[["eq_delta", "eq_gamma", "eq_xgamma", "eq_resid"]].sum(axis=1)
+    assert np.allclose(tay, res["eq"], atol=1e-9)
+    th = res[["theta_value", "theta_delta", "theta_gamma"]].sum(axis=1)
+    assert np.allclose(th, res["time"], atol=1e-9)
+    top = res[["eq", "vol", "cross_ev", "time", "fwd", "rate", "resid"]].sum(axis=1)
+    assert np.allclose(top, res["pl"], atol=1e-9)
+    assert (np.abs(res["premium"] - ref["premium"]) < 0.03 * ref["premium"]).all()
 
 
 @pytest.mark.skipif(not all(p.exists() for p in CSV3),
