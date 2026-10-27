@@ -49,8 +49,10 @@ and git history.
 - Record: code — `rainbow.profile_tables`, `profile_uniforms(tables=)`,
   `crash_lift_profile(corr, lam, c_dn=−1, width=0.3, n_iter=4, n_points=2^17,
   seed=11, return_scores)` (the calibration script's fixed point moved into
-  the package; `run_rainbow_corr_profile.py` calls it, caches re-generated
-  bit-identical); `rainbow_torch.sobol_points(n_slots, n_paths, d)`,
+  the package; `run_rainbow_corr_profile.py` calls it — the helper reproduces the
+  script's former closure bit for bit in loadings, scores and profile at
+  λ 0.2466 and 0.113, checked directly; the full-script rerun was still
+  running at commit time); `rainbow_torch.sobol_points(n_slots, n_paths, d)`,
   `sobol_uniforms_profile`, `price_sobol_batch(normals=None, ...,
   uniforms=None)`, `rainbow_attribution_ss(copula=(a_of_w, breaks))`; fifth
   pass of `scripts/run_rainbow_attribution.py` (`CRASH_LIFT_LAMBDA = 0.2466`,
