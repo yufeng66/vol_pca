@@ -60,6 +60,38 @@ and git history.
   the rv_continuous wrapper dominated); `sigmoid_profile` takes per-index
   tail strengths (the script's `make_profile` now calls it; caches
   re-generated bit-identical).
+- Record (model choice, user question "pick one, balancing fit, speed,
+  robustness as a hedge target, simplicity"): measured a one-parameter
+  **crash lift** — now the third calibrated row of
+  `scripts/run_rainbow_corr_profile.py` (`crash_lift` in both caches, with
+  the sub-sample λ's) and the seventh candidate in the notebook —
+  `sigmoid_profile(a, lam, 0, c_dn=−1, width=0.3)` with
+  centre and width fixed by the shape of the realized profile, one shared
+  λ, no up-tail cut, unconditional level re-matched to the 5-day matrix by
+  a four-step fixed point on the base loadings (plateau loadings 0.771 /
+  0.873 / 0.482 vs 0.821 / 0.914 / 0.522). Fit to the 21-day bins: λ* 0.245,
+  χ² 10.8 (Gaussian 18.3, steps 12–15, rank-fit sigmoid 2.8); SPX–SX5E
+  half-split 0.63 | 0.42 vs realized 0.59 | 0.45; the residual misfit is
+  HSI-specific (worst quintile −1.2 sd on both HSI pairs, best quintile
+  +1.8 sd on SPX–HSI — the features the per-index sigmoid spends its extra
+  parameters on). ρ SPX–SX5E: 0.95 below −2σ, 0.85 at −1σ, 0.68 plateau.
+  **Parameter stability**: λ 0.25 full sample, 0.25 first half (to
+  2022-10), but 0.11 ex-COVID (2020-02..06 dropped) and 0.12 second half —
+  the lift is one episode. Prices vs the Gaussian baseline (ATM / cap /
+  package, bps): 2026-07-31 +5.6 / −5.2 / +10.8 at λ*, +2.8 / −2.6 / +5.4 at
+  λ=0.11; other dates package +9.2 / +10.3 / +10.9 (2022 / 2024 / 2020) at
+  λ*, half that at the ex-COVID λ. Package deltas (±1% bump of each
+  index's performance-to-date, marginals frozen) rise 2.8–3.2% per index
+  under the crash lift (COVID date +4%): the hedge barely moves.
+  **Recommendation given**: keep the Gaussian copula at the 5-day level as
+  the single hedge-target model (deltas within 3% of the best-supported
+  alternative, robust level estimate, quad engine of record, zero extra
+  parameters); if an asymmetric model is required, the one-parameter crash
+  lift is the only one worth carrying (second place: one interpretable
+  parameter, 40% of the Gaussian's misfit removed, stable +10-bp package
+  impact across regimes) — as a reserve/adjustment line, not a recalibrated
+  hedge target, because λ halves depending on whether COVID is in the
+  window. The 12-parameter sigmoid is a fit, not a model.
 - Record: copula helpers moved into `vol_pca/rainbow.py` (numpy, tested in
   `tests/test_rainbow_profile.py`): `one_factor_loadings`,
   `step_profile`, `tanh_profile`, `sigmoid_profile(a_mid, lam_dn, lam_up,
