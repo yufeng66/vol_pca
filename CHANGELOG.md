@@ -92,6 +92,63 @@ and git history.
   impact across regimes) — as a reserve/adjustment line, not a recalibrated
   hedge target, because λ halves depending on whether COVID is in the
   window. The 12-parameter sigmoid is a fit, not a model.
+- Record (horizon question, user: 21 vs 63 days for the asymmetry; scratch,
+  not cached): realized worst-quintile excess over Gaussian (SPX–SX5E /
+  SPX–HSI / SX5E–HSI): 21d +0.27 / +0.32 / +0.26 (sd 0.13–0.17), 63d +0.46 /
+  +0.27 / +0.09 (sd 0.14–0.24); SPX–SX5E half-split 21d 0.59 | 0.45, 63d
+  0.64 | 0.29; mean down−up +0.19 vs +0.30; rank level SPX–SX5E 0.743 vs
+  0.687. Ex-COVID: 21d excess +0.15 / +0.17 / +0.16, asymmetry +0.12; 63d
+  +0.40 / +0.04 / −0.09, asymmetry +0.20, rank level 0.619 (the 63-day
+  level itself swings 0.07 on one episode; 30 independent windows). Fits
+  to the 63d bins: crash lift λ 0.50 (0.23 ex-COVID) vs 0.23 (0.09) at 21d;
+  12-parameter sigmoid at the 63d rank level χ² 6.8 with λ_up SPX 0.36 —
+  ρ SPX–SX5E 0.96 at −2σ, 0.69 plateau, 0.40 at +2σ, half-split 0.62 | 0.22.
+  Prices vs the Gaussian-5d baseline (ATM / cap / package, 2026-07-31):
+  crash lift 21d +5.3 / −5.0 / +10.2 (20% of the package gap), sigmoid 21d
+  +4.6 / −7.3 / +11.9 (24%), crash lift 63d +9.3 / −8.6 / +17.9 (36%),
+  sigmoid 63d +14.7 / −8.8 / +23.4 (47%); 2022-03-16 the same ordering
+  (+8.6 / +10.2 / +15.7 / +22.4). So a 63-day calibration roughly doubles
+  the covered share, almost entirely through a lower SPX–SX5E up-side
+  correlation; verdict given: within noise of the 21-day read, driven by
+  the SPX–SX5E pair alone (the HSI lift vanishes at 63d ex-COVID), and
+  choosing the horizon by how much of the quote it covers is fitting to
+  the quote by the back door — if the quote is the target, calibrate λ to
+  it and use the history as the plausibility band. Level-horizon ladder
+  for SPX–SX5E (Pearson / normal-score rank): 5d 0.751 / 0.717, 21d
+  0.823 / 0.743, 63d 0.765 / 0.687; Pearson at 10d 0.793 / 0.442 / 0.495
+  (196 independent windows); the daily correlation corrected for one day
+  of lead-lag (sum of lags −1..+1) is 0.63 / 0.42 / 0.49, so the 5-day
+  window has absorbed the asynchronous close for the HSI pairs and the
+  5d→10d→21d drift (0.75 → 0.79 → 0.82 Pearson, 0.68 → 0.70 → 0.69
+  Spearman) is within the sampling sd of 0.02–0.045.
+- Record (calibration-horizon ladder for the crash lift + write-up, user ask
+  for a document justifying the 21-day crash lift; scratch, not cached): λ
+  fitted to each horizon's own quintile bins with that horizon's bootstrap sd
+  — 5d 0.08 (χ² 29.6 → 25.7), 10d 0.08 (19.7 → 18.0), 21d 0.22 (17.6 → 11.0;
+  the objective is flat at 11.1–11.4 between λ 0.16 and 0.30, so the cached
+  0.247 is the same fit under another bootstrap draw), 63d 0.50 (23.6 →
+  12.5). Realized worst-quintile excess by horizon (SPX–SX5E / SPX–HSI /
+  SX5E–HSI): 5d +0.16 / +0.22 / +0.20 (sd 0.08–0.10), 10d +0.21 / +0.11 /
+  +0.20, 21d +0.26 / +0.31 / +0.25, 63d +0.46 / +0.27 / +0.07; half-split
+  asymmetry +0.08 / +0.11 / +0.19 / +0.30 — the lift is week-scale-visible but
+  only fully formed and uniform across pairs at 21d, one-pair at 63d. Prices
+  vs gauss_5d (ATM / cap / package): 2026-07-31 λ(5d)=λ(10d) +2.1 / −1.9 /
+  +4.1 (8%), 21d +5.0 / −4.7 / +9.8 (20%), 63d +9.3 / −8.6 / +17.9 (36%);
+  2022-03-16 +1.0 / −2.4 / +3.4, +2.3 / −5.9 / +8.2, +4.9 / −10.8 / +15.7.
+  Gaussian-5d half-splits under the same conditioning 0.51 | 0.51, 0.02 |
+  0.02, 0.09 | 0.09 (crash lift 0.63 | 0.42, 0.07 | −0.02, 0.15 | 0.05; mean
+  asymmetry +0.14 vs realized +0.19, sd 0.07). Crash-lift fit residuals in sd
+  units (model − realized; Gaussian in brackets): worst quintile +0.3 / −1.2 /
+  −1.1 (−2.1 / −1.8 / −1.7), SPX–SX5E best quintile −1.5 (+0.2; the plateau
+  0.68 vs realized up-side 0.74 is the cost of re-matching the 5-day level),
+  SPX–HSI best quintile +1.8 (+2.3). Loading cap vs λ under the level
+  re-match: SX5E's crash-state loading is at 0.999 from λ ≈ 0.25, SPX's from
+  ≈ 0.35, so beyond that only HSI's loading responds and no λ reaches the
+  bank's +50 package gap. Write-up: `docs/crash_lift_21d.md` — the case for
+  the 21-day crash lift as the house correlation-skew model (what it is, why
+  a dependence model, why one parameter, why 21 days, why the level stays at
+  5 days, fit, prices, cost, governance, what it does not claim,
+  recommendation).
 - Record: copula helpers moved into `vol_pca/rainbow.py` (numpy, tested in
   `tests/test_rainbow_profile.py`): `one_factor_loadings`,
   `step_profile`, `tanh_profile`, `sigmoid_profile(a_mid, lam_dn, lam_up,
