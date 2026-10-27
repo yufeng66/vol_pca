@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
+from scipy.special import ndtr
 from scipy.stats import norm, qmc
 
 from vol_pca.pricing import black76
@@ -347,6 +348,101 @@ def price_geo_quad(marginals, corr, df, n_outer=24, n_inner=24, n_y=257,
     cond = np.trapezoid(S, y, axis=1)
     pv = df * float((h1[:, None] * h2[None, :]).ravel() @ cond) * notional
     return {"pv": pv, "n_nodes": n_outer * n_inner}
+
+
+# --- correlation-profile copula (user ask 2026-10-27) ---------------------
+# A one-factor Gaussian copula whose loadings depend on the common market
+# factor: Z_i = a_i(W) W + sqrt(1 - a_i(W)^2) e_i with W, e_i iid N(0,1)
+# (Andersen-Sidenius random factor loadings). Dependence is then stronger
+# where a(W) is larger — typically down markets — while the implied
+# marginals stay exact: the raw Z_i are no longer normal, so their exact CDF
+# is tabulated by quadrature over W and applied before the quantile step.
+# A constant profile is the plain Gaussian copula; for three indices any
+# positive pairwise target matrix is reached exactly by one_factor_loadings.
+
+
+def one_factor_loadings(corr):
+    """a_i = sqrt(r_ij r_ik / r_jk): the exact one-factor loadings of a 3x3
+    correlation matrix with positive off-diagonals (a_i a_j = r_ij)."""
+    c = np.asarray(corr, dtype=float)
+    r12, r13, r23 = c[0, 1], c[0, 2], c[1, 2]
+    a = np.sqrt([r12 * r13 / r23, r12 * r23 / r13, r13 * r23 / r12])
+    if np.any(~np.isfinite(a)) or np.any(a >= 1.0):
+        raise ValueError(f"target matrix not one-factor representable: a={a}")
+    return a
+
+
+def step_profile(a_dn, a_up, theta=0.0):
+    """a_i(w) = a_dn[i] below the factor threshold theta, a_up[i] above."""
+    return lambda w, j: np.where(w < theta, a_dn[j], a_up[j])
+
+
+def tanh_profile(a_mid, lam, a_max=0.999):
+    """a_i(w) = a_i (1 - lam tanh w), clipped at a_max: correlation keeps
+    falling the further up the market goes, perfect in a deep sell-off."""
+    return lambda w, j: np.minimum(a_mid[j] * (1.0 - lam * np.tanh(w)), a_max)
+
+
+def sigmoid_profile(a_mid, lam_dn, lam_up, c_dn=-1.0, c_up=1.0, width=0.5,
+                    a_max=0.999):
+    """Two-sided smooth profile: a_i(w) = a_i (1 + lam_dn_i s((c_dn - w)/width)
+    - lam_up_i s((w - c_up)/width)) with s the logistic function — a plateau
+    at a_i through the middle of the market distribution, lifted by lam_dn
+    in the down tail (below c_dn) and cut by lam_up in the up tail (above
+    c_up). lam_dn / lam_up are scalars or one value per index. tanh_profile
+    is the special case c_dn = c_up = 0, lam_dn = lam_up. Loadings are
+    clipped at a_max."""
+    n = len(a_mid)
+    ld = np.broadcast_to(np.asarray(lam_dn, dtype=float), (n,))
+    lu = np.broadcast_to(np.asarray(lam_up, dtype=float), (n,))
+
+    def prof(w, j):
+        g = (1.0 + ld[j] / (1.0 + np.exp(-(c_dn - w) / width))
+             - lu[j] / (1.0 + np.exp(-(w - c_up) / width)))
+        return np.clip(a_mid[j] * g, 0.0, a_max)
+    return prof
+
+
+def profile_cdf_table(a_of_w, j, breaks=(), n_w=600, z=None):
+    """Exact CDF of Z_j = a_j(W) W + sqrt(1 - a_j(W)^2) e on a z grid, by
+    Gauss-Legendre over W split at the profile's break points (the integrand
+    is smooth between breaks; pass a step profile's threshold here)."""
+    if z is None:
+        z = np.linspace(-9.0, 9.0, 3001)
+    x, wgt = np.polynomial.legendre.leggauss(n_w)
+    edges = [-9.5, *sorted(breaks), 9.5]
+    f = np.zeros_like(z)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        w = 0.5 * (hi - lo) * x + 0.5 * (hi + lo)
+        pw = 0.5 * (hi - lo) * wgt * norm.pdf(w)
+        a = a_of_w(w, j)
+        s = np.sqrt(1.0 - a * a)
+        f += ndtr((z[:, None] - a[None, :] * w[None, :]) / s[None, :]) @ pw
+    f = np.clip(np.maximum.accumulate(f), 0.0, 1.0)
+    return z, f
+
+
+def profile_uniforms(points, a_of_w, breaks=()):
+    """(n, 4) uniform points (W, e_1..e_3) -> (n, 3) copula uniforms with
+    exactly uniform marginals under the loading profile a_of_w(w, j)."""
+    w = norm.ppf(points[:, 0])
+    eps = norm.ppf(points[:, 1:])
+    u = np.empty_like(eps)
+    for j in range(eps.shape[1]):
+        a = a_of_w(w, j)
+        zj = a * w + np.sqrt(1.0 - a * a) * eps[:, j]
+        zg, fg = profile_cdf_table(a_of_w, j, breaks)
+        u[:, j] = np.clip(np.interp(zj, zg, fg), 1e-12, 1 - 1e-12)
+    return u
+
+
+def sample_performances_profile(marginals, a_of_w, n_paths, seed=0, breaks=()):
+    """sample_performances for the correlation-profile copula (scrambled
+    Sobol in d = 1 + n_indices; n_paths a power of two)."""
+    eng = qmc.Sobol(d=1 + len(marginals), scramble=True, seed=seed)
+    pts = eng.random_base2(int(np.log2(n_paths)))
+    u = profile_uniforms(pts, a_of_w, breaks)
+    return np.column_stack([m.quantile(u[:, j]) for j, m in enumerate(marginals)])
 
 
 def bs_implied_vol(price, fwd, strike, ttm, df=1.0, hi=5.0):

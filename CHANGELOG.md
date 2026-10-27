@@ -10,6 +10,217 @@ Add an entry here for every substantive experiment, including (especially)
 negative results. Reconstructed 2026-08-06 from CLAUDE.md, session memory
 and git history.
 
+## 2026-10-27 — Smooth correlation profile calibrated to the 21-day history: a quarter of the package gap, split between legs by the level convention
+
+- Question (user): keep the smooth-profile idea, use the 21-day
+  correlation, and shape the profile to the realized correlation in
+  several market-move bins rather than just up/down; then table the
+  existing Gaussian baseline, a Gaussian on the 21-day correlation, and
+  the calibrated profile. Method: normal scores of overlapping 21-day log
+  returns, pair correlations inside quintile bins of the mean score (the
+  market move), block-bootstrapped. The realized profile is Gaussian-like
+  through the middle three quintiles, +0.25…+0.32 above the Gaussian
+  benchmark on every pair in the worst quintile, and below it in the best
+  quintile on the HSI pairs only (−0.15 SPX–HSI; SPX–SX5E at the
+  benchmark) — a shape one centred tanh cannot hold. New
+  `sigmoid_profile`: a plateau through the middle, a per-index down-tail
+  lift below `c_dn` and up-tail cut above `c_up`, common width;
+  least-squares on CRN Sobol (2^17) to the binned profile with the
+  unconditional level pinned. Two calibrations because the level
+  convention matters: the 21-day Pearson log-return matrix (0.823 /
+  0.427 / 0.501, what `historical_corr(spots, 21)` returns and what the
+  Gaussian-21d row uses) vs the 21-day rank correlation of the same data
+  (0.743 / 0.408 / 0.492) — Pearson is inflated by the COVID co-crash,
+  which is exactly the tail dependence the profile models explicitly.
+  Conclusion: **the history-calibrated profile explains about a quarter
+  of the ~50 bp package gap on every date (+12 to +15 bps), consistent
+  with the 0.90/0.60 step row it resembles; which leg gets it depends on
+  the level convention.** Pinned to the Pearson level the profile moves
+  ATM +8 / cap −5 vs the existing baseline (shape alone vs the Gaussian-
+  21d row: +6 / −8); fit level-and-shape to the normal scores it moves
+  ATM +2 / cap −10 — the plateau sits at 0.70, below the baseline's 0.75,
+  which gives the ATM back what the down-tail lift adds. Switching the
+  Gaussian from 5-day to 21-day correlation does nothing for the package
+  (−1 bp: both legs +2…+3). The bank's +25 / −25 remains three quarters
+  unexplained after the most history-faithful dependence model so far.
+- Record: notebook `rainbow_corr_profile.ipynb` (user ask, same day;
+  analysis-only off the two caches, ~10 s): A. the realized profile —
+  Pearson-vs-rank table by horizon, 21-day quintile-binned correlations vs
+  the Gaussian benchmark with bootstrap bands, the excess at 5/21/63 days,
+  half-split table; B. six candidates (steps 0.85/0.65, 0.90/0.60,
+  0.85/0.55 beyond +0.5σ, tanh 0.3, the two sigmoids) as ρ_ij(W) curves,
+  their binned profiles against the realized one, and a fit table (raw and
+  shape-only χ² on the 15 bins, half-splits) — rank-fit sigmoid χ² 2.8,
+  steps 12–15, Pearson-pinned 13.4 raw / 3.7 shape, Gaussian 17.8, tanh
+  41.8; C. the price table on 2026-07-31, the (ΔATM, Δcap) scatter against
+  the bank's (+25, −25) with the step grid as background, Δpackage by
+  candidate across the four dates, and the three grid heatmaps. Speed fix
+  found while building it: `profile_cdf_table` now calls
+  `scipy.special.ndtr` instead of `norm.cdf` (same values, ~20× faster —
+  the rv_continuous wrapper dominated); `sigmoid_profile` takes per-index
+  tail strengths (the script's `make_profile` now calls it; caches
+  re-generated bit-identical).
+- Record: copula helpers moved into `vol_pca/rainbow.py` (numpy, tested in
+  `tests/test_rainbow_profile.py`): `one_factor_loadings`,
+  `step_profile`, `tanh_profile`, `sigmoid_profile(a_mid, lam_dn, lam_up,
+  c_dn, c_up, width)` (`a_i(W) = a_i (1 + lam_dn,i σ((c_dn − W)/width) −
+  lam_up,i σ((W − c_up)/width))`, clipped at 0.999), `profile_cdf_table`,
+  `profile_uniforms(points, a_of_w, breaks)`,
+  `sample_performances_profile`. Tests: loadings reproduce the pairs,
+  constant profile ⇒ CDF = Φ to 1e-9 and Pearson = target within 0.01,
+  KS of every marginal < 0.01 under step/tanh/sigmoid profiles with
+  down-half > up-half correlation. `scripts/run_rainbow_corr_regime.py`
+  now imports them (same output). New driver
+  `scripts/run_rainbow_corr_profile.py` (~6 min CPU) →
+  `data/rainbow_corr_profile.csv` (prices) +
+  `data/rainbow_corr_profile_fit.json` (both fits: parameters, binned
+  realized/model profiles, rho_ij(W) tables, half-splits).
+- Record: realized 21d binned profile (bins' mean W −1.20 / −0.39 / +0.04
+  / +0.43 / +1.13; excess over the Gaussian at the rank level, SPX–SX5E,
+  SPX–HSI, SX5E–HSI): bin 0 +0.27 (sd 0.12) / +0.32 (0.16) / +0.25
+  (0.17); bins 1–3 within ±0.05 except SPX–SX5E bin 2 −0.12 (sd 0.16);
+  bin 4 +0.00 (0.07) / −0.15 (0.07) / −0.04 (0.11). Constant profile
+  chi² 16.5 on 15. **profile_21d** (Pearson-pinned): chi² 3.7; lam_dn
+  (0.23, 0.01, 0.50), lam_up (0.00, 0.00, 0.28), c_dn −0.96, c_up +0.30,
+  width 0.16, base loadings (0.786, 0.990, 0.483) vs Gaussian-21d
+  (0.838, 0.982, 0.510) — SX5E's loading is at its cap so the lift goes
+  through SPX and HSI; rho SPX–SX5E 0.96 below W=−1.5, 0.88 at −1, 0.78
+  plateau and up tail; HSI pairs 0.70/0.73 deep down, 0.37/0.46 plateau,
+  0.27/0.35 above +0.5; half-split down 0.72/0.14/0.25 | up 0.58/−0.10/
+  0.01 (realized 0.59/0.15/0.23 | 0.45/−0.10/0.07). **profile_rank**
+  (level + shape from the normal scores): chi² 2.7; lam_dn (0.39, 0.04,
+  0.54), lam_up (0.01, 0, 0.32), c_dn −1.41, c_up +0.32, width 0.16, base
+  (0.731, 0.957, 0.522); rho SPX–SX5E 0.99 below −2, 0.89 at −1.5, 0.72
+  at −1, 0.70 plateau, 0.69 up; HSI pairs 0.80 deep down, 0.37–0.48
+  plateau, 0.26–0.34 up; half-split down 0.59/0.14/0.26 | up 0.44/−0.11/
+  0.01 — the realized split to the second decimal.
+- Record: prices in bps (ATM / cap / spread) and moves vs gauss_5d.
+  2026-07-31: gauss_5d 751.3 / 221.2 / 530.1 (quad 751.3 / 221.2);
+  gauss_21d 753.4 / 224.4 / 529.0 (+2.1 / +3.2 / −1.1); profile_21d
+  759.6 / 216.1 / 543.6 (+8.3 / −5.1 / +13.5 = 27% of the package gap);
+  profile_rank 752.9 / 210.9 / 542.0 (+1.6 / −10.3 / +11.9 = 24%).
+  2022-03-16: +5.0/+4.0/+1.0; +7.2/−6.4/+13.6; −4.2/−13.0/+8.8.
+  2024-10-08: +2.4/+2.7/−0.3; +8.8/−5.9/+14.7; +1.3/−10.6/+11.9.
+  2020-03-16: +9.3/+8.9/+0.4; +10.2/−3.5/+13.7; −8.1/−18.0/+9.9 (Sobol
+  vs quad 2 bps apart on the COVID surface, the known quad tail). Caveats
+  unchanged: 21-day dependence applied to 1Y performances; ~94
+  independent 21-day windows, bootstrap sd 0.12–0.17 in the tail bins;
+  the fit under-lifts the down tail slightly under the Pearson pin
+  because the pin leaves no room (lifting the tail raises the
+  unconditional level, so the plateau must fall).
+
+## 2026-10-27 — Up/down correlation regimes vs the bank quotes: right signs, about a third of the gap
+
+- Question (user): the bank quotes the ATM basket call ~25 bps of notional
+  above our model and the 112% cap call ~25 bps below it; can a copula with
+  a different correlation on the down side and on the up side explain the
+  difference, and how much of it? Method: a two-regime one-factor copula
+  (Andersen–Sidenius random factor loadings) — one correlation matrix when
+  the common market factor is negative, another when it is positive, the
+  three indices' implied marginals kept exact through the tabulated CDF of
+  the now non-normal scores — priced on 2^20 CRN Sobol paths over a grid of
+  (ρ_down, ρ_up) for the SPX–SX5E pair (the other two pairs shifted by the
+  same amount), on 2026-07-31 and three panel dates; plus a threshold
+  inside the rally and the smooth tanh profile; plausibility judged by the
+  exceedance-correlation asymmetry of the realized 5/21/63-day returns,
+  block-bootstrapped. Conclusion: **asymmetric correlation is the one
+  mid-model mechanism with the right sign on both legs, but it explains
+  about a third of each gap, not the gap.** Raising the down-side
+  correlation lifts both legs (ATM +11 / cap +6 bps per +0.10), lowering
+  the up-side correlation lowers both (ATM −5 / cap −9 per −0.10); the
+  wedge between legs is only the difference of those slopes (the ATM's
+  dispersion exposure through the 0.5/0.3 rank weights), so a pure
+  asymmetry around the historical level reaches ~+9 ATM / −8 cap on the
+  quote date (ρ_down 0.92 / ρ_up 0.55, or 0.85 / 0.55 with the low
+  correlation starting only beyond a +0.5σ rally) — ~35% of each leg and
+  of the ~50-bp package gap, stable across the four dates. Pushing to the
+  edge of what the data allow (ρ_up 0.45 beyond +0.5σ) gets +11 / −15,
+  half the package gap; matching +25/−25 would need perfect correlation in
+  down markets and ~0.1–0.2 in rallies (exceedance asymmetry 0.6–0.8,
+  2–4× the most generous historical read), and even then the ATM stops at
+  +17…+20. The residual (~16 bps ≈ 0.45 vol pt per leg) stays a bid/offer
+  overlay, now two thirds of the previous size. The 2026-10-22 discussion
+  this follows (level knobs move both legs together; call-wing tilt fixes
+  the cap and hurts the ATM; margins scale with vega so the two 25-bp gaps
+  are the same ~0.7 vol pt) was never logged — recorded below.
+- Record: script `scripts/run_rainbow_corr_regime.py` (~1.5 min CPU,
+  numpy only) → `data/rainbow_corr_regime.csv` (gitignored; per date ×
+  config: atm/cap/spread bps, deltas vs the Gaussian baseline, Pearson
+  after the marginal fix, exceedance asymmetries). Model: `Z_i = a_i(W)·W
+  + sqrt(1−a_i²)·ε_i`, `a(W)` = `a_dn` for `W < θ` else `a_up`; for three
+  indices every positive pairwise target is reached exactly by
+  `one_factor_loadings` (`a_i = sqrt(ρ_ij ρ_ik / ρ_jk)`), so the 5-day
+  historical matrix (0.751 / 0.429 / 0.478) is reproduced to fp at
+  `a = (0.821, 0.914, 0.522)` and the δ=0 cell matches the quad engine
+  (751.3 / 221.2 bps on 2026-07-31). Marginal fix = `profile_cdf_table`
+  (Gauss–Legendre over W split at the regime break, 600 nodes per piece,
+  3001-point z table) applied before each implied-marginal quantile;
+  `profile_uniforms` takes any loading profile `a(w)` (`step_profile`,
+  `tanh_profile`). ρ_down caps at ~0.92 (SX5E loading → 1 under the
+  additive all-pairs shift; the pair-only shift caps at 0.90). 2^20
+  4-d scrambled Sobol (W, ε₁..₃), seed 7, CRN across the grid.
+- Record: grid on 2026-07-31 (ATM / cap, bps vs baseline; rows ρ_dn, cols
+  ρ_up): 0.751/0.65 −5/−9; 0.751/0.45 −19/−29; 0.85/0.751 +11/+6;
+  0.92/0.751 +20/+9; anti-diagonal (level held ≈ historical, Pearson
+  0.75): 0.80/0.70 +3/−1, 0.85/0.65 +7/−3, 0.90/0.60 +10/−4, 0.92/0.55
+  +9/−8; corner 0.92/0.45 +2/−18 (Pearson 0.70 — a level cut). Other
+  dates, 0.92/0.55: 2022-03-16 +5/−10, 2024-10-08 +9/−8, 2020-03-16
+  +8/−10. Threshold θ=+0.5: 0.85/0.55 +9/−9 (spread +18), 0.90/0.45
+  +11/−15 (spread +26; 2022-03-16 +6/−20); θ=+1.0: 0.85/0.45 +12/−9,
+  0.90/0.45 +19/−3; θ=−1 (crash-only) with ρ_up at history is a level
+  lift (+10/+2) and with both sides moved a level cut (−2/−18). Pair-only
+  (HSI pairs held): 0.85/0.65 +6/−0.4 — the cap's move needs the HSI
+  pairs' up-side correlation to fall too. tanh `a·(1−λ tanh W)` clipped at
+  0.999: λ=0.3 +20/−10 (ρ₁₂ 0.998 at W=−1, 0.45 at +1), 0.6 +17/−23
+  (Pearson 0.66), 0.8 +12/−31; on 2022-03-16 λ=0.6 gives +6/−30 — not a
+  robust fit. Linear extrapolation of the θ=0 slopes to +25/−25 needs
+  ρ_dn ≈ 1.26 / ρ_up ≈ 0.13: unreachable.
+- Record: realized exceedance asymmetry (normal scores of overlapping h-day
+  log returns, corr | both below the q-quantile minus corr | both above the
+  1−q quantile; 126-day block bootstrap 90% band): q=0.30 mean over pairs
+  5d +0.06 [−0.07, +0.18], 21d +0.34 [+0.10, +0.52], 63d +0.27 [−0.00,
+  +0.51]; SPX–SX5E pair alone 5d +0.08 [−0.05, +0.15], 21d +0.18 [−0.14,
+  +0.27], 63d +0.17 [−0.10, +0.51] — the asymmetry is real at monthly
+  horizons but sits mostly in the HSI pairs; the Gaussian benchmark at
+  matched n is −0.01 ± 0.15 (21d). Model cells (q=0.30 mean / SPX–SX5E):
+  0.85/0.65 0.17 / 0.26, 0.90/0.60 0.26 / 0.40, 0.92/0.55 0.31 / 0.49,
+  θ=0.5 0.85/0.55 0.19 / 0.30 (inside the bands — the most the data
+  support), θ=0.5 0.90/0.45 0.27 / 0.43 (pair above the 21d band),
+  tanh λ=0.3 0.43 / 0.79 (far outside). Caveat: the copula is applied to
+  1Y performances while the dependence is measured at ≤63 days
+  (~30 independent 63-day windows); the 21d and 63d bands are wide for
+  that reason.
+- Record (alignment follow-up, user question "which row matches the
+  history?"): same statistic on both sides — Pearson correlation of the
+  normal scores in the down half vs the up half, split on the sign of the
+  mean score (a plain Gaussian copula shows no asymmetry under this split).
+  Realized SPX–SX5E down | up: 5d 0.49 | 0.47, 21d 0.59 | 0.45, 63d
+  0.64 | 0.29; mean down−up over pairs +0.08 / +0.19 / +0.30 (bootstrap sd
+  0.04 / 0.07 / 0.13). Model rows: 0.85/0.65 → 0.62 | 0.43 (+0.14),
+  0.90/0.60 → 0.68 | 0.39 (+0.20), 0.92/0.55 → 0.69 | 0.35 (+0.24), θ=0.5
+  0.85/0.55 → 0.64 | 0.39 (+0.19), θ=0.5 0.90/0.45 → 0.69 | 0.34 (+0.27),
+  tanh 0.3 → 0.79 | 0.25 (+0.34). RMS over the six half-correlations vs the
+  21d set: 0.058 / 0.058 / 0.072 / 0.066 / 0.088 / 0.122 (Gaussian 0.103);
+  vs 63d: 0.111 / 0.092 / 0.085 / 0.100 / 0.091 / 0.095 (Gaussian 0.167).
+  **0.90/0.60 is the best all-horizon compromise** (matches the monthly
+  asymmetry +0.20 vs +0.19; ATM +10 / cap −4, 28% of the package gap);
+  0.85/0.65 ties it at 21d and wins at 5d, 0.92/0.55 wins at 63d. The
+  additive shift puts the asymmetry in SPX–SX5E (model 0.68 vs realized
+  0.59 down-half) while the history has more of it in the HSI pairs.
+- Record (2026-10-22 discussion, measured on the quad engine, previously
+  unlogged): model ATM 751 / cap 221 bps on 2026-07-31, basket implied vols
+  15.5 / 13.4, vega 38 / 34 bps per basket-vol pt ⇒ the two 25-bp gaps are
+  0.66 and 0.74 vol pts — the same size in vol terms (margins scale with
+  vega, not premium; the cap carries 88% of the ATM's vega). Level knobs
+  move both legs together (corr +0.10: +15/+14; index vols +1 pt:
+  +36/+31); call-wing tilt −0.5 pt per 10 moneyness pts: −8/−20 (fits the
+  cap, hurts the ATM; fitting both with level + tilt needs +1.5 vol pt and
+  −1.8 pt/10 mon — implausible vs listed markets); t-copula ν=5 level-
+  matched −10/−8. Cap vega sits in the SPX/SX5E 105–125 columns (13 + 11
+  bps/pt; HSI 3.5). Advice stands: compare in vol points per leg and ask
+  for a package quote; treat the gap as a margin overlay calibrated across
+  banks/dates rather than bending the mid model.
+
 ## 2026-10-05 — Regression (minimum-variance) delta on the ATM book, exact: lowest daily variance, worse drift, no β horizon dominates sticky strike
 
 - Question (user): build the alternative delta — bump the equity and, when
